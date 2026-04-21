@@ -141,7 +141,7 @@ zone_weight_array = vectorized_lookup(zone_cats)
 zone_weight_array = zone_weight_array / zone_weight_array[~np.isnan(zone_weight_array)].sum()
 
 # sample N locations
-N = 5000
+N = 2500
 
 # Flatten and normalize
 prob_flat = zone_weight_array.flatten()
@@ -167,3 +167,5 @@ plt.show()
 ds_sub = xr.Dataset(coords={'y':ds_zones.y.values, 'x':ds_zones.x.values})
 ds_sub['subsampling'] = (('y','x'), mask_2d)
 ds_sub.to_netcdf(os.path.sep.join([aux_dir, f'GRL_subsampleidx_{N}.nc']))
+
+# %%
