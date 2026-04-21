@@ -32,7 +32,7 @@ import help_fcts
 
 
 
-DAYS_PER_MEDRANGE = 7  # number of days per medium-range aggregate (e.g. weekly average)
+DAYS_PER_MEDRANGE = 30  # number of days per medium-range aggregate (e.g. weekly or monthly average)
 
 class ZarrDataset():
     def __init__(self, specs):
@@ -42,14 +42,10 @@ class ZarrDataset():
         dask.config.set(scheduler='threads')
         self.specs = specs
         self.data_specs = specs['data']
-        directory_specs = specs['directories']
-        self.base_dir = os.path.abspath(os.path.sep.join([project_dir, directory_specs['base_dir']]))
-        self.file_dir = os.path.sep.join([self.base_dir, directory_specs['data_file']])
-        temp_data_split = os.path.sep.join([self.base_dir, directory_specs['temp_split_file']])
-        with open(temp_data_split, 'r') as f: 
-            self.train_val_test_indices = json.load(f)
-        self.spatial_idx_file = os.path.sep.join([self.base_dir, directory_specs['spatial_sub_file']])
-        
+        self.directory_specs = specs['directories']
+        self.base_dir = os.path.abspath(os.path.sep.join([project_dir, self.directory_specs['base_dir']]))
+        self.file_dir = os.path.sep.join([self.base_dir, self.directory_specs['data_file']])
+
         self.auto = self.specs['model'].get('auto')
         if not isinstance(self.auto, dict):
             self.auto = {}
@@ -63,8 +59,8 @@ class ZarrDataset():
         if isinstance(self.targets,str):
             self.targets = [self.targets]
 
-        if 'trunoff_file' in directory_specs:
-            self.runoff_dir = os.path.sep.join([self.base_dir, directory_specs['trunoff_file']])
+        if 'trunoff_file' in self.directory_specs:
+            self.runoff_dir = os.path.sep.join([self.base_dir, self.directory_specs['trunoff_file']])
         else:
             self.runoff_dir = None
 
@@ -151,7 +147,7 @@ class ZarrDataset():
                     days_per_entity=DAYS_PER_MEDRANGE
                 )
         else:
-            self.inputs_medrange_new = self.inputs_medrange
+            self.inputs_medrange_new = []
         
         self.inputs_auto = []
         if len(self.auto) > 0:
@@ -173,10 +169,10 @@ class ZarrDataset():
         return _ds
 
 
-    def check_file(self):
+    def check_file(self, datafile='train_sub.zarr'):
         """Check if file exists and contains all variables."""
-        logging.info(f"Check data in {self.file_dir}")
-        with xr.open_zarr(self.file_dir+'/train_sub.zarr', consolidated=True) as ds:
+        logging.info(f"Check data {datafile} in {self.file_dir}")
+        with xr.open_zarr(self.file_dir+'/'+datafile, consolidated=True) as ds:
 
             for x in self.variables_full:
                 if x not in ds.variable_names:
@@ -212,12 +208,25 @@ class ZarrDataset():
             #     raise KeyError("Not all dates in test indices are included in dataset!")
 
 
+    def get_spatial_indices(self):
+        spatial_idx_file = os.path.sep.join([self.file_dir, self.directory_specs['spatial_sub_file']])
+        logging.info(f"Load spatially sub-sampling for training and validation data from file {spatial_idx_file}...")
+        spatial_idx = xr.open_dataset(os.path.sep.join([spatial_idx_file]))['subsampling']
+        logging.info(f"  sub-sample {int(spatial_idx.sum().item())} locations.")
+        return spatial_idx
 
-    def make_file(self):
+    def make_file(self, use_spatial_subsampling=True):
         """Create zarr file from base dataset in case check_file was unsuccessful."""
         os.makedirs(self.file_dir, exist_ok=True)
         logging_config.define_root_logger(os.path.join(self.file_dir, f'log.txt'))
         logging.getLogger().setLevel(logging.INFO)
+
+        temp_data_split = os.path.sep.join([self.base_dir, self.directory_specs['temp_split_file']])
+        logging.info(f'Load temporal split data from file {temp_data_split}...')
+        with open(temp_data_split, 'r') as f: 
+            train_val_test_indices = json.load(f)
+        if use_spatial_subsampling:
+            spatial_idx = self.get_spatial_indices()
 
         logging.info("Create zarr data file...")
         self.read_data()
@@ -251,13 +260,9 @@ class ZarrDataset():
         self.ds = self.ds.chunk({"time": self.processing_chunk_size, "z": self.processing_chunk_size})
         logging.info("  finished rechunking.")
         
-        logging.info(f"Spatially sub-sample training and validation data using {self.spatial_idx_file}:")
-        spatial_idx = xr.open_dataset(os.path.sep.join([self.spatial_idx_file]))['subsampling']
-        logging.info(f"  sub-sample {int(spatial_idx.sum().item())} locations out of {len(self.ds.z)}")
-
         # Subsample train and val data temporally and spatially
         logging.info("Get training data...")
-        train_dates = pd.to_datetime(self.train_val_test_indices['train'])
+        train_dates = pd.to_datetime(train_val_test_indices['train'])
         train_dates_start = np.min(train_dates) - pd.Timedelta(days=historic_period)
         train_dates_end = np.max(train_dates)
         logging.info(f"  extract training data from {train_dates_start} to {train_dates_end} ...")
@@ -269,7 +274,7 @@ class ZarrDataset():
         train_set = train_set.chunk({"time": self.processing_chunk_size, "z": self.processing_chunk_size})
         train_set = self.add_historic_data(train_set)
 
-        val_dates = pd.to_datetime(self.train_val_test_indices['val'])
+        val_dates = pd.to_datetime(train_val_test_indices['val'])
         val_dates_start = np.min(val_dates) - pd.Timedelta(days=historic_period)
         val_dates_end = np.max(val_dates)
         logging.info(f"  extract val data from {val_dates_start} to {val_dates_end} ...")
@@ -279,7 +284,7 @@ class ZarrDataset():
         val_set = self.add_historic_data(val_set)
 
         logging.info(f"  use val dataset without sub-sampling for testing after training...")
-        test_dates = pd.to_datetime(self.train_val_test_indices['test'])
+        test_dates = pd.to_datetime(train_val_test_indices['test'])
         test_dates_start = np.min(test_dates) - pd.Timedelta(days=historic_period)
         test_dates_end = np.max(test_dates)
         logging.info(f"  extract test data from {test_dates_start} to {test_dates_end} ...")
@@ -291,7 +296,7 @@ class ZarrDataset():
         self.fill_vals = {var: None for var in self.variables_full_contd if var + '_mask' in self.variables_full}
 
         # fit scaler on spatially and temporally sub-sampled training data!
-        train_sub_dates = pd.to_datetime(self.train_val_test_indices['train_sub'])
+        train_sub_dates = pd.to_datetime(train_val_test_indices['train_sub'])
         train_sub = train_set.sel(time=train_sub_dates)
         self.fit_scaler(train_sub)
         ## alternatively load an existing scaler
@@ -345,7 +350,7 @@ class ZarrDataset():
 
 
 
-    def prepare_prediction_file(self, dates, daily_file, medrange_file=None, spinup_file=None, scaler_file=None, savedir='./predictions.zarr'):
+    def prepare_prediction_file(self, dates, daily_file, medrange_file=None, spinup_file=None, scaler_file=None, use_spatial_subsampling=False, savedir='./predictions.zarr'):
         """
         Create zarr from basefile for making prediction from new data
         """
@@ -358,8 +363,8 @@ class ZarrDataset():
         # add all the data for previous days and medium-range aggregates, and the auto-regressive variables
         historic_period = 1 + np.max([self.data_specs['prec_days'], self.prec_medrange_units * 7])
         dates_all = pd.to_datetime(dates)
-        dates_start = np.min(dates_all) - pd.Timedelta(days=historic_period)
-        dates_end = np.max(dates_all)
+        dates_start = np.min(dates_all).replace(hour=0, minute=0, second=0) - pd.Timedelta(days=historic_period)
+        dates_end = np.max(dates_all).replace(hour=23, minute=59, second=59)
         time_slice = slice(dates_start, dates_end)
 
         logging.info(f"  Open daily data from {dates_start} to {dates_end} ...")
@@ -416,6 +421,10 @@ class ZarrDataset():
 
         if 'transform_targets' in self.data_specs:
             self.transform_vars(self.data_specs['transform_targets'])
+
+        if use_spatial_subsampling:
+            spatial_idx = self.get_spatial_indices()
+            self.ds = self.ds.where(spatial_idx, drop=True)
 
         logging.info("Rechunk base dataset ...")
         self.ds = self.ds.chunk({"time": self.processing_chunk_size, "z": self.processing_chunk_size})

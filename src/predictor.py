@@ -51,12 +51,14 @@ class ModelPredictor():
         self.time_values = dataloader.dataset.dates
         self.nr_z = len(set(self.z_values))
         self.nr_time = len(set(self.time_values))
+        logging.info(f'Number of time steps: {self.nr_time}')
         self.nr_samples = dataloader.dataset.nr_samples
         logging.info(f'Number of samples in dataset: {self.nr_samples}.')
         batch_size = self.dataloader.batch_size
         self.chunk_size = 1000
         if self.chunk_size > self.nr_samples/batch_size:
             self.chunk_size = int(np.ceil((self.nr_samples/batch_size)))
+        
         
         self.get_scaler()
         
@@ -70,6 +72,23 @@ class ModelPredictor():
             if self.specs['data']['transform_targets']:
                 self.transform_targets = True
 
+
+    def close(self):
+        """Explicitly clean up resources"""
+        try:
+            if hasattr(self, 'model'):
+                del self.model
+        except Exception:
+            pass
+        
+        try:
+            if hasattr(self, 'dataloader'):
+                shutdown_dataloader(self.dataloader)
+        except Exception:
+            pass
+        
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
     def make_predictions_file(self, coords,  ref_coords=None, extra_coords=None, inference_mode=False):
@@ -148,9 +167,11 @@ class ModelPredictor():
                 logging.exception("shutdown_dataloader failed")
                 
             try:
-                store = getattr(raw_group, 'store', None)
-                if store is not None and hasattr(store, 'close'):
-                    store.close()
+                if raw_group is not None:
+                    store = getattr(raw_group, 'store', None)
+                    if store is not None and hasattr(store, 'close'):
+                        store.close()
+                    raw_group.store.close()  # Add explicit close
             except Exception:
                 pass
 
@@ -169,23 +190,33 @@ class ModelPredictor():
                     shutil.rmtree(self.rawpredictions_file)
                 except Exception:
                     pass
+
+            try:
+                if hasattr(self, 'model'):
+                    del self.model
+            except Exception:
+                pass
+            
             gc.collect()
+            torch.cuda.empty_cache()
       
 
         
     def _load_model(self):
         logging.info('Init model...')
         self.model = NN.init_model(self.var_dict, self.specs).to(self.device)
-        logging.info('Load model...')
-        if self.load == 'best':
-            PATH = os.path.sep.join([self.model_dir, 'best_model.pth'])
-        elif self.load == 'latest':
-            PATH = os.path.sep.join([self.model_dir, 'latest_model.pth'])
-        else:
-            raise ValueError('load has to be either "best" or "latest"')
-        checkpoint = torch.load(PATH, weights_only=True, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.model.eval()
+        model_name = f'{self.load}_model.pth'
+        try:
+            PATH = os.path.sep.join([self.model_dir, model_name])
+            logging.info(f'Load model {str(PATH)}...')
+            checkpoint = torch.load(PATH, weights_only=True, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.model.eval()
+        except FileNotFoundError:
+            raise FileNotFoundError(f'Cannot load model: {self.load} model not found')
+        except Exception as e:
+            raise ValueError(f'Cannot load model: {e}')
+
     
         
     def _create_raw_zarr_file(self, coords):
@@ -255,7 +286,7 @@ class ModelPredictor():
             chunks=(self.chunk_size),
             overwrite=True
         )
-        self.time[:] = self.time_values
+        self.time[:] = np.array(self.time_values, dtype='datetime64[ns]')
 
         return zarr_file
 
@@ -301,7 +332,7 @@ class ModelPredictor():
         start_index = 0
 
         for i, (x_daily, x_medrange, x_spinup, y, y_prev, trunoff_map, doy, idx) in enumerate(self.dataloader, start=1):
-            batchsize = 1  # only implemented for batchsize=1 for now!
+            batchsize = int(x_daily.size(1)/self.nr_z)   #1  # only implemented for batchsize=1 for now!
             # if next batch would exceed the time chunk size, flush the buffer to zarr file
             if self.buffer_count + batchsize > BUFFERSIZE:
                 logging.info(f"  Flush buffer to zarr file at index {start_index} with {self.buffer_count} entries.")
@@ -366,8 +397,8 @@ class ModelPredictor():
             # else:
             #     raise ValueError("DOY tensor contains multiple values!")
             #self.buffer_doy[self.buffer_count:self.buffer_count+batchsize] = doy_value
-            self.buffer_real[self.buffer_count:self.buffer_count+batchsize,:,:] = y.cpu().numpy().reshape(1, self.nr_z, len(self.targets))
-            self.buffer_pred[self.buffer_count:self.buffer_count+batchsize,:,:] = output.cpu().numpy().reshape(1, self.nr_z, len(self.targets))
+            self.buffer_real[self.buffer_count:self.buffer_count+batchsize,:,:] = y.cpu().numpy().reshape(batchsize, self.nr_z, len(self.targets))
+            self.buffer_pred[self.buffer_count:self.buffer_count+batchsize,:,:] = output.cpu().numpy().reshape(batchsize, self.nr_z, len(self.targets))
             self.buffer_count += batchsize
             
         # flush the remaining buffer to the zarr file 
@@ -472,8 +503,24 @@ class ModelPredictor():
         return ds_xr
 
 
-    def get_scaler(self): 
-        self.scaler_path = os.path.sep.join([ project_dir, self.specs['directories']['base_dir'], self.specs['directories']['data_file'], 'std_scaler.npz' ]) 
-        logging.info(f"Load scaler file {self.scaler_path}")
-        with np.load(self.scaler_path) as npz:
-            self.scaler = {k: npz[k].copy() for k in npz.files}
+    def get_scaler(self):
+        scaler_paths = [
+            os.path.sep.join([project_dir, self.specs['directories']['base_dir'], self.specs['directories']['data_file'], 'std_scaler.npz']),
+            os.path.sep.join([self.model_dir, 'std_scaler.npz']),
+            os.path.sep.join([self.model_dir, '..', 'std_scaler.npz'])
+            ]
+
+        self.scaler = {}
+        for self.scaler_path in scaler_paths:
+            try:
+                with np.load(self.scaler_path) as npz:
+                    self.scaler = {k: npz[k].copy() for k in npz.files}
+                logging.info(f"Load scaler file {self.scaler_path}")
+                break  # Success, stop trying
+            except FileNotFoundError:
+                continue
+
+        if not self.scaler:
+            logging.warning("No scaler file found.")
+
+
