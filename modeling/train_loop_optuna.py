@@ -28,7 +28,7 @@ import read_yaml
 from prepare_trainset import ZarrDataset
 
 
-SPECS_FILE_NAME = "specs_optuna_melt_modularNN_multitarget.yml"
+SPECS_FILE_NAME = "specs_optuna_melt_modularNN_wotas.yml"
 MAIN_TARGET = "snmel"    # define a main target for scoring of trials, as loss for multi-target training depends on different weightings
 MAIN_SCORE = "rmse"  # define main score to optimize, must be a return value from train_meltNN.perform_training()
 
@@ -48,7 +48,7 @@ def objective(trial):
     logging_config.define_root_logger(os.path.join(out_dir_abs, f'log.txt'))
 
     # Define hyperparameters to tune
-    config['training']['lr'] = trial.suggest_float('lr', 1e-3, 1e-2, log=True)
+    config['training']['lr'] = trial.suggest_float('lr', 1e-3, 1e-1, log=True)
 
     ## tune weights for loss function for multitarget training
     # config['training']['loss_weights'] = trial.suggest_categorical('loss_weights', [{'snmel':0.5, 'albedom':0.5},
@@ -130,10 +130,10 @@ if __name__ == "__main__":
     df.to_csv(os.path.sep.join([out_dir_abs, "optuna_trials.csv"]), index=False)
 
     # run after tuning to collect scores of all trials
-    df = pd.DataFrame(columns=['trial', 'rmse', 'mae', 'mbe'])
+    df = pd.DataFrame(columns=['trial', 'rmse', 'mae', 'mbe', 'r2'])
     for trialnr in range(n_trials):
         # take care to not make all the plots in eval_meltNN!
-        rmse, mae, mbe = eval_meltNN.main(specs['directories']['out_dir']+f'/trial_{trialnr}', mode='val', reconstruct_coords=False)
-        df = pd.concat([df, pd.DataFrame({'trial':[trialnr], 'rmse':[rmse], 'mae':[mae], 'mbe':[mbe]})], ignore_index=True)
+        rmse, mae, mbe, r2 = eval_meltNN.main(specs['directories']['out_dir']+f'/trial_{trialnr}', mode='val', reconstruct_coords=False)
+        df = pd.concat([df, pd.DataFrame({'trial':[trialnr], 'rmse':[rmse], 'mae':[mae], 'mbe':[mbe], 'r2':[r2]})], ignore_index=True)
     df.sort_values('mae', inplace=True)
     df.to_csv(os.path.sep.join([out_dir_abs, 'scores_val.csv']), sep=',', index=False)

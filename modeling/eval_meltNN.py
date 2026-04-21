@@ -88,13 +88,13 @@ def main(out_dir, mode='val', reconstruct_coords=False):
     #     zones = None
     #     zones_nr = 0
 
-    # or use basins as zones to evaluate
+    # use basins
     basins_dir = os.path.sep.join([base_dir, 'GRLmask.zarr'])
-    zones = xr.open_zarr(basins_dir)['maskbas']
-    if 'z' in zones.dims:
-        zones = zones.set_index(z=['y', 'x']).unstack('z')
+    basins = xr.open_zarr(basins_dir)['maskbas']
+    if 'z' in basins.dims:
+        basins = basins.set_index(z=['y', 'x']).unstack('z')
     logging.info(f'Loaded basins file from {basins_dir}.')
-    zones_nr = np.unique(zones.values[~np.isnan(zones.values)]).tolist()
+    basins_nr = np.unique(basins.values[~np.isnan(basins.values)]).tolist()
 
     # ---------------------------- Evaluation ----------------------------
 
@@ -179,6 +179,13 @@ def main(out_dir, mode='val', reconstruct_coords=False):
         target_names = var_dict['target']
         for i,target_name in enumerate(target_names):
             logging.info(f'Initialize ModelEvaluator for {target_name} ...')
+            
+            ## to create DJF map plot
+            # ds = ds.sel(time=slice('2015-12-01', '2016-02-28'))
+            # time = ds.indexes["time"]
+            # new_time = time.where(time.year != 2015, time.map(lambda t: t.replace(year=2016)))
+            # ds = ds.assign_coords(time=new_time)
+
             m_eval = eval_model.ModelEvaluator(ds, target_name=target_name, batch_size=128, zones=zones)
             
             logging.info(f'{target_name}_true min: {ds[target_name+"_true"].min().compute().item()}, max: {ds[target_name+"_true"].max().compute().item()}.')
@@ -198,31 +205,30 @@ def main(out_dir, mode='val', reconstruct_coords=False):
                 rmse_main = rmse
                 mae_main = mae
                 mbe_main = mbe
+                r2_main = r2
 
-            val_fig_dir = os.path.sep.join([model_dir, f'{eval_specifier}_figures'])
-            os.makedirs(val_fig_dir, exist_ok=True)
+            # val_fig_dir = os.path.sep.join([model_dir, f'{eval_specifier}_figures'])
+            # os.makedirs(val_fig_dir, exist_ok=True)
 
-            # plot density of predictions vs target per year
-            years = np.unique(ds.time.dt.year.values)
-            #ax_lims = {'snmel': (-7,180), 'albedom': None}
-            ax_lims = {target_name: None}
-            for y in years:
-                ax = m_eval.plot_pred_vs_target_density(f'{target_name}_true', f'{target_name}_pred', year=y, ref_line='equal', x_lims=ax_lims[target_name])
-                fig_dir = os.path.sep.join([val_fig_dir, f"true_vs_pred_{target_name}_density_year{y}.png"])
-                ax.get_figure().savefig(fig_dir, bbox_inches="tight", dpi=300)
-                logging.info(f'Saved plot to {fig_dir}.')
-                plt.close()
+            # # plot density of predictions vs target per year
+            # years = np.unique(ds.time.dt.year.values)
+            # ax_lims = {'snmel': (-7,180), 'albedom': None}
+            # for y in years:
+            #     ax = m_eval.plot_pred_vs_target_density(f'{target_name}_true', f'{target_name}_pred', year=y, ref_line='equal', x_lims=ax_lims[target_name])
+            #     fig_dir = os.path.sep.join([val_fig_dir, f"true_vs_pred_{target_name}_density_year{y}.png"])
+            #     ax.get_figure().savefig(fig_dir, bbox_inches="tight", dpi=300)
+            #     logging.info(f'Saved plot to {fig_dir}.')
+            #     plt.close()
             
-            # # plot density of predictions vs target for each zone separately
-            # if zones_nr is not None:
-            #     logging.info(f'Plot groundtruth vs prediction density per zone ...')
-            #     for zone in zones_nr:
-            #         ax = m_eval.plot_pred_vs_target_density(f'{target_name}_true', f'{target_name}_pred', ref_line='equal', zone_cat=zone)
-            #         plt.show()
-            #         fig_dir = os.path.sep.join([val_fig_dir, f"true_vs_pred_{target_name}_density_zone{str(zone)}.png"])
-            #         ax.get_figure().savefig(fig_dir, bbox_inches="tight", dpi=300)
-            #         logging.info(f'Saved plot to {fig_dir}.')
-            #         plt.close()
+            # # plot density of predictions vs target for each basin separately
+            # logging.info(f'Plot groundtruth vs prediction density per basin ...')
+            # for basin in basins_nr:
+            #     ax = m_eval.plot_pred_vs_target_density(f'{target_name}_true', f'{target_name}_pred', ref_line='equal', zone_cat=basin)
+            #     plt.show()
+            #     fig_dir = os.path.sep.join([val_fig_dir, f"true_vs_pred_{target_name}_density_basin{str(basin)}.png"])
+            #     ax.get_figure().savefig(fig_dir, bbox_inches="tight", dpi=300)
+            #     logging.info(f'Saved plot to {fig_dir}.')
+            #     plt.close()
             
             # # plot for test year per month
             # year = np.unique(ds.time.dt.year.values)[-1]  # last year in dataset
@@ -233,35 +239,69 @@ def main(out_dir, mode='val', reconstruct_coords=False):
             #     logging.info(f'Saved plot to {fig_dir}.')
             #     plt.close()
                                 
-            # make maps of predictions, true values, and differences true-pred
-            val_fig_dir_map = os.path.sep.join([val_fig_dir, 'maps'])
-            os.makedirs(val_fig_dir_map, exist_ok=True)
+            # # make maps of predictions, true values, and differences true-pred
+            # val_fig_dir_map = os.path.sep.join([val_fig_dir, 'maps'])
+            # os.makedirs(val_fig_dir_map, exist_ok=True)
+           
+            # # totals per year
+            # years = np.unique(ds.time.dt.year.values)
+            # for y in years:
+            #     ax = m_eval.plot_map(year=y, join_colorbar=True)
+            #     plt.show()
+            #     fig_dir = os.path.sep.join([val_fig_dir_map, f"map_{target_name}_{y}.png"])
+            #     ax.get_figure().savefig(fig_dir, bbox_inches="tight", dpi=300)
+            #     logging.info(f'Saved plot to {fig_dir}.')
+            #     plt.close()
+
+
+            # # test year per month
+            # year = np.unique(ds.time.dt.year.values)[-1]
+            # for m in list(calendar.month_name[1:]):
+            #     ax = m_eval.plot_map(year=year, month=m, join_colorbar=True)
+            #     plt.show()
+            #     fig_dir = os.path.sep.join([val_fig_dir_map, f"map_{target_name}_{year}_month{m}.png"])
+            #     ax.get_figure().savefig(fig_dir, bbox_inches="tight", dpi=300)
+            #     logging.info(f'Saved plot to {fig_dir}.')
+            #     plt.close()
+
+            # # test year per season
+            # seasons = {'JJA': ['June', 'July', 'August'], 'MAM': ['March', 'April', 'May'], 'SON': ['September', 'October', 'November'], 'DJF': ['December', 'January', 'February']}
+            # # use pred file for entire time period, and select dec. 2015 to feb 2016 to use correct DJF data!
+            # value_lims = {'JJA': (0,4900) , 'MAM': (0, 1900), 'SON': (0,1100), 'DJF': (0,270)}
+            # for s, months in seasons.items():
+            #     ax = m_eval.plot_map(month=months, value_lim=value_lims[s], join_colorbar=True)
+            #     plt.show()
+            #     fig_dir = os.path.sep.join([val_fig_dir_map, f"map_{target_name}_season{s}.png"])
+            #     ax.get_figure().savefig(fig_dir, bbox_inches="tight", dpi=300)
+            #     logging.info(f'Saved plot to {fig_dir}.')
+            #     plt.close()
 
             # # some July days
             # residual_max = {'albedom':None, 'snmel':30}
             # value_lims = {'albedom':(0.35, 0.9), 'snmel':(0,100)}
-            # for d in ds.time[201:203]:
+            # for d in ds.time[180:221:10]:
             #     date_str = pd.to_datetime(d.astype('datetime64[D]').item()).strftime('%Y-%m-%d')
             #     ax = m_eval.plot_map(date=d, residual_max=residual_max[target_name], value_lim=value_lims[target_name])
             #     fig_dir = os.path.sep.join([val_fig_dir_map, f"map_{target_name}_date{date_str}.png"])
             #     ax.get_figure().savefig(fig_dir, bbox_inches="tight", dpi=300)
             #     logging.info(f'Saved plot to {fig_dir}.')
             #     plt.close()
-            
-            # totals per year
-            years = np.unique(ds.time.dt.year.values)
-            for y in years:
-                ax = m_eval.plot_map(year=y, join_colorbar=True)
-                plt.show()
-                fig_dir = os.path.sep.join([val_fig_dir_map, f"map_{target_name}_{y}.png"])
-                ax.get_figure().savefig(fig_dir, bbox_inches="tight", dpi=300)
-                logging.info(f'Saved plot to {fig_dir}.')
-                plt.close()
 
+            # # some single days across the year
+            # residual_max = {'albedom':None, 'snmel':30}
+            # value_lims = {'albedom':(0.35, 0.9), 'snmel':(0,100)}
+            # # dates = pd.date_range(start="2016-01-01", end="2016-12-01", freq="1MS")+pd.Timedelta(days=20)
+            # for d in dates:
+            #     date_str = d.strftime('%Y-%m-%d')
+            #     ax = m_eval.plot_map(date=d, residual_max=residual_max[target_name], value_lim=value_lims[target_name])
+            #     fig_dir = os.path.sep.join([val_fig_dir_map, f"map_{target_name}_date{date_str}.png"])
+            #     ax.get_figure().savefig(fig_dir, bbox_inches="tight", dpi=300)
+            #     logging.info(f'Saved plot to {fig_dir}.')
+            #     plt.close()
 
         
     logging.shutdown()
-    return rmse_main, mae_main, mbe_main
+    return rmse_main, mae_main, mbe_main, r2_main
 
 
 parser = argparse.ArgumentParser(description = 'Evaluate NN_firn model')
@@ -271,7 +311,7 @@ args = parser.parse_args("")
 
 if __name__ == "__main__":
 
-    # Run evaluation on test sets for best model per config:
+    # # Run evaluation on test sets for best model per config:
     # main('./output/optuna_melt_regression/trial_0', mode='test', reconstruct_coords=True)
     # main('./output/optuna_melt_shorttermNN/trial_28', mode='test', reconstruct_coords=True)
     # main('./output/optuna_melt_modularNN/trial_21', mode='test', reconstruct_coords=True)
@@ -279,6 +319,9 @@ if __name__ == "__main__":
     # main('./output/optuna_melt_modularNN_multitarget_trainable/trial_23', mode='test', reconstruct_coords=True)
     # main('./output/optuna_melt_modularNN_noseason', mode='test', reconstruct_coords=True)
     # main('./output/optuna_melt_modularNN_albedo', mode='test', reconstruct_coords=True)
-
-    # Run evaluation on all data from 1990-2016 for Modular NN:
-    main('./output/modularNN', mode='data_1990-2016', reconstruct_coords=False)
+    # main('./output/optuna_melt_modularNN_EBMTd/trial_22', mode='test', reconstruct_coords=True)
+    # main('./output/optuna_melt_modularNN_EBMT/trial_18', mode='test', reconstruct_coords=True)
+    # main('./output/optuna_melt_modularNN_EBM/trial_13', mode='test', reconstruct_coords=True)
+    # main('./output/optuna_melt_modularNN_EBS/trial_9', mode='test', reconstruct_coords=True)
+    # main('./output/optuna_melt_modularNN_EBR/trial_22', mode='test', reconstruct_coords=True)
+    main('./output/optuna_melt_modularNN_EBMnodoy/trial_21', mode='test', reconstruct_coords=True)

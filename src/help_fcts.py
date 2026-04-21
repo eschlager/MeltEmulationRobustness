@@ -31,6 +31,20 @@ def get_mbe(residual, ndigits=None):
         score = round(score, ndigits=ndigits)
     return score
 
+def calc_anomaly(ds, clim):
+    md_clim = clim['time'].dt.strftime('%m-%d')
+    clim = clim.assign_coords(md=md_clim)
+
+    # group by the md coordinate and average
+    clim = clim.groupby('md').mean(dim='time')
+
+    md_data = ds['time'].dt.strftime('%m-%d')
+    ds = ds.assign_coords(md=('time', md_data.values)) 
+
+    anomaly = (ds.groupby('md') - clim).compute()
+
+    return anomaly, clim, ds
+
 def get_r2(true, pred, ndigits=None):
     from sklearn.metrics import r2_score
     true = true.astype('float64').flatten()

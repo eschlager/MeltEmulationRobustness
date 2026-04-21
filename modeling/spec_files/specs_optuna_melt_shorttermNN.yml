@@ -1,4 +1,4 @@
-# spec file for NNmelt
+# spec file for Shortterm NN
 
 directories:
   base_dir: data/processed/HIRHAM5-ERAInterim/v_02

@@ -1,0 +1,64 @@
+# spec file for Modular NN EBM_noDOY
+
+directories:
+  base_dir: data/processed/HIRHAM5-ERAInterim/v_04
+  data_file: melt_10days_energysum
+  out_dir: output/optuna_melt_modularNN_wotasdoy
+  overwrite: true
+  temp_split_file: train_val_test_split_100.json
+  spatial_sub_file: GRL_subsampleidx_5000_flattened.zarr
+  zones_file: GRLzones.zarr
+
+data:
+  input:
+  - rainfall
+  - snfall
+  - energyin
+  - dswrad
+  - rainfall_10yr-avg
+  - snfall_10yr-avg
+  - energyin_10yr-avg
+  - dswrad_10yr-avg
+  prec_days: 9
+  target:
+  - snmel
+  transform_inputs:
+    rainfall: [log,1]
+    snfall: [log,1]
+
+
+model:
+  # auto:
+  #   snmel: 5
+  hidden_activation: LeakyReLU
+  layers_daily_feat_extractor:
+  - 128
+  - 128
+  - 256
+  layers_medrange_feat_extractor: null
+  layers_regressor:
+  - 256
+  - 128
+  - 64
+  - 32
+  - 16
+  layers_spinup_feat_extractor:
+  - 32
+  - 32
+  output_activation: ""
+  use_season: false
+
+training:
+  auto_mode: false
+  batch_size: 256
+  continue_training: false
+  epochs: 300
+  loss_reg: mse
+  loss_class: bce  # bce uses BCEWithLogitsLoss so do not use sigmoid activation in model when training!
+  bce_weight: 4   # the average of the 4 best performing weights form classification study
+  loss_weights: trainable    # must be 'equal', or 'trainable', or a dict with respective weight for each target (weights will be normalized to sum to 1)
+  lr: 0.001
+  lr_decay: 0.9
+  lr_decay_epochs: 50
+  optimizer: adam
+  warmup_epochs: 0    # must be >0 to be active

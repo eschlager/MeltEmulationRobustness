@@ -11,7 +11,8 @@ The proposed ML model is a modular Neural Network, trained on HIRHAM5 data; it t
 
 
 ## Data Availability
-Data will be published on Zenodo soon!
+Data for model training is available upon request.
+Output data is available at Zenodo: [DOI: 10.5281/zenodo.19627367](https://doi.org/10.5281/zenodo.19627367)
 
 
 ## Limitations
@@ -24,10 +25,10 @@ Data will be published on Zenodo soon!
 MeltEmulation
 ├── data (see Data Availability)
 ├── evaluations: jupyter notebooks for evaluating and comparing models
-│   ├── calc_climatology: calculate climatology of true and predicted melt values
-│   ├── evaluate_best_models: computes scores for best model for each configuration (Table 2)
-│   ├── evaluate_modularNN: evaluate Modular NN basin-wise (Tables 3 & C1, Fig. 6)
-│   ├── evaluate_tuning_val: evaluate the tuning results of all configurations (Fig. B1, Table B1)
+│   ├── calc_climatology: calculate climatology of true and predicted melt values (Table A1)
+│   ├── evaluate_best_models: computes scores for best model for each configuration (Tables 3 and 4)
+│   ├── evaluate_modularNN: evaluate Modular NN basin-wise (Table 5, Fig. 8)
+│   ├── evaluate_tuning_val: evaluate the tuning results of all configurations (Tables C1 and C2, Fig. C1)
 │   └── plot_GRL: plot zones and basin maps
 ├── figures: resulting fiugres from evaluations scripts
 ├── modeling
@@ -54,7 +55,9 @@ MeltEmulation
 
 
 ## Citation
-This repository accompanies a paper that is currently in the submission process.
+This repository accompanies a paper that is currently in the submission process
+[DOI: 10.5194/egusphere-2026-7](https://egusphere.copernicus.org/preprints/2026/egusphere-2026-7/)
+
 
 
 Code: licensed under MIT — see `LICENSE` file .

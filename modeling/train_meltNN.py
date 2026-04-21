@@ -242,8 +242,10 @@ def perform_training(specs):
     val_data = FirnpackCellsDataset(file_dir_val, dates=val_dates, variable_names=var_dict)
     val_dataloader = DataLoader(val_data, batch_size=1, shuffle=False, collate_fn=my_collate_fn, num_workers=0)
     
+    xy_coords_ref = None
+    lonlat_coords_ref = None
     try:
-        coords_file = os.path.sep.join([file_dir, '..', 'coords_only.nc'])
+        coords_file = os.path.sep.join([file_dir, '..', 'coords_only.zarr'])
         coords_ref = xr.open_dataset(coords_file)
         if 'x' in coords_ref and 'y' in coords_ref:
             xy_coords_ref = (coords_ref['x'], coords_ref['y'])
@@ -254,8 +256,6 @@ def perform_training(specs):
         coords_ref.close()
     except Exception as e:
         logging.warning(f"Could not read coordinates from reference file {coords_file}: {e}")
-        xy_coords_ref = None
-        lonlat_coords_ref = None
 
     with xr.open_zarr(val_data.file_dir) as ds:
         x_coords = ds['x'].values
@@ -291,6 +291,9 @@ def perform_training(specs):
                 mbe = m_eval.get_mbe()
                 scores[target_name+'_mbe'] = mbe
                 logging.info(f'MBE {target_name}: {mbe}')
+                r2 = m_eval.get_r2()
+                scores[target_name+'_r2'] = r2
+                logging.info(f'R2 {target_name}: {r2}')
 
                 # plot density of predictions vs target
                 ax = m_eval.plot_pred_vs_target_density(f'{target_name}_true', f'{target_name}_pred', ref_line='equal')

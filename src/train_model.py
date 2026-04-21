@@ -136,7 +136,8 @@ class ModelTrainer():
                         loss_history.to_csv(os.path.sep.join([self.out_dir, 'loss.csv']), sep=';', index=False)
             
                 
-                # self.best_val = np.min(self.val_loss)
+                self.best_val = np.min(self.val_loss)
+                self.best_train = np.min(self.train_loss)
                 self.start_epoch = checkpoint['epoch'] + 1
 
 
@@ -249,7 +250,7 @@ class ModelTrainer():
                     total_samples += batch_size
                     self.optimizer.zero_grad(set_to_none=True)   # set_to_none to save memory: https://discuss.pytorch.org/t/the-location-of-zero-grad-at-the-training-loop/160206
                     
-                    if sequ_len >1 and self.auto_mode and autoreg_rate>0:
+                    if sequ_len>1 and self.auto_mode and autoreg_rate>0:
                         autoreg_batch_size = int(autoreg_rate * batch_size)
                         # logging.info(f'Use {autoreg_batch_size} auto-reg samples')
                         # use full rollout window for first autoreg_batch_size samples
@@ -275,6 +276,9 @@ class ModelTrainer():
                     trunoff_map = trunoff_map[-1,:,:]
                     doy = doy[-1,:]
                     output = self.model(x_daily, x_medrange, x_spinup, y_prev, trunoff_map, doy)
+
+                    ## run diagnosis after first epoch
+                    # self.model.diagnose_training(x_daily, x_medrange, x_spinup, y_prev, trunoff_map, doy, y[-1,:,:], epoch)
 
                     # calculate loss
                     if len(self.targets)==1: 
@@ -303,8 +307,7 @@ class ModelTrainer():
                         self.train_loss_components[t].append(train_loss_epoch_vars[t])
                         logging.info(f'             with {self.loss_fct_tags[t]} for {t}: {train_loss_epoch_vars[t]:.6f}')
 
-                if total_train_loss < self.best_train:
-                    self.best_train = total_train_loss
+
 
                 # perform validation of epoch
                 val_loss_epoch = 0.
@@ -392,6 +395,12 @@ class ModelTrainer():
                     logging.info(f'Save latest model at epoch {epoch} with validation loss: {total_val_loss:.6f}')
                     self.checkpoint(epoch, os.path.sep.join([self.out_dir, 'latest_model.pth']))
                 
+                # save best model (w.r.t. training loss)
+                if total_train_loss < self.best_train:
+                    self.best_train = total_train_loss
+                    logging.info(f'Safe new best model at epoch {epoch} with training loss: {self.best_train:.6f}')
+                    self.checkpoint(epoch, os.path.sep.join([self.out_dir, 'best_train_model.pth']))
+
                 # save best model (w.r.t. validation loss)
                 if total_val_loss < self.best_val:
                     self.best_val = total_val_loss
@@ -409,7 +418,10 @@ class ModelTrainer():
                     if lr_old != lr_now:
                         logging.info(f'Learning rate changed from {lr_old} to {lr_now}')
                         lr_old = lr_now
-                    
+
+
+                
+   
         # finally: save latest model       
         logging.info(f'Save latest model at epoch {epoch} with validation loss: {total_val_loss:.6f}')
         self.checkpoint(epoch, os.path.sep.join([self.out_dir, 'latest_model.pth']))

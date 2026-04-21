@@ -72,9 +72,9 @@ class NN(nn.Module):
         # init block for medium-range data
         if self.layers_medrange is not None:
             logging.debug(f"Init medium-range block ...")
-            if self.use_season:
-                logging.info(f"   ... add two input nodes for seasonal information to medium-range block.")
-                self.layers_medrange[0] += 2
+            # if self.use_season:
+            #     logging.info(f"   ... add two input nodes for seasonal information to medium-range block.")
+            #     self.layers_medrange[0] += 2
             self.NNmedrange = NNBlock(self.layers_medrange, hidden_act=self.hidden_activation)
             
         # init spin-up block
@@ -166,9 +166,6 @@ class NN(nn.Module):
         y = self.NNdaily(y)
 
         if self.layers_medrange is not None:
-            if self.use_season:
-                y_season = self._get_seasonality(doy).to(y.device)
-                x_medrange = torch.cat([x_medrange, y_season], dim=1)
             y = torch.cat([self.NNmedrange(x_medrange), y], dim=1)
 
         if self.layers_spinup is not None:
@@ -204,26 +201,30 @@ class NN(nn.Module):
             nr_inputs += 1
         
         layers_regressor = [nr_inputs] + self.layers_regressor
-        self.regressor = NNBlock(layers_regressor, hidden_act=self.hidden_activation)
+        self.regressor = NNBlock(layers_regressor, hidden_act=self.hidden_activation, use_batchnorm=False)
         
         # define final heads for each target
         self.reg_heads = nn.ModuleDict()
         for i,target in enumerate(self.targets):  
             # add one hidden layer per target
             linear1 = nn.Linear(layers_regressor[-1], layers_regressor[-1])
-            nn.init.kaiming_normal_(linear1.weight, nonlinearity='leaky_relu')
+            nn.init.kaiming_normal_(linear1.weight, a=0.01, nonlinearity='leaky_relu')
             activation1 = getattr(nn, self.hidden_activation)()
             
             # add output layer for each target
             linear2 = nn.Linear(layers_regressor[-1], 1)
             if self.output_activation[target] == 'ReLU':
                 nn.init.kaiming_normal_(linear2.weight, nonlinearity='relu')
+            elif self.output_activation[target] == 'Softplus':
+                #nn.init.kaiming_normal_(linear2.weight, nonlinearity='linear')
+                nn.init.xavier_normal_(linear2.weight)
+                nn.init.constant_(linear2.bias, 0.1) 
             elif self.output_activation[target] == '':
                     nn.init.kaiming_normal_(linear2.weight, nonlinearity='linear')
             elif self.output_activation[target] == 'Sigmoid':  # use linear activation for classification and BCEwithLogitsLoss, i.e. actually Sigmoid activation!
                 nn.init.xavier_normal_(linear2.weight)   
             else: 
-                nn.init.kaiming_normal_(linear2.weight, nonlinearity='leaky_relu')       
+                nn.init.kaiming_normal_(linear2.weight, a=0.01, nonlinearity='leaky_relu')       
             
             if (self.output_activation[target] == 'Sigmoid') or (self.output_activation[target] == ''):
                 # do not use output activation for BCEwithLogits
@@ -249,7 +250,7 @@ class NN(nn.Module):
         
         
 class NNBlock(nn.Module): 
-    def __init__(self, layers, hidden_act):
+    def __init__(self, layers, hidden_act, use_batchnorm=False):
         super().__init__()
         
         hidden_activation = getattr(nn, hidden_act)()
@@ -258,6 +259,8 @@ class NNBlock(nn.Module):
         if len(layers) > 1:
             for i in range(len(layers)-1):
                 self.linears.append(nn.Linear(layers[i], layers[i+1]))
+                if use_batchnorm:
+                    self.linears.append(nn.BatchNorm1d(layers[i+1]))
                 self.linears.append(hidden_activation)
 
         self.apply(self._initialize_weights)  
@@ -265,7 +268,7 @@ class NNBlock(nn.Module):
             
     def _initialize_weights(self, m):
         if isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, nonlinearity='leaky_relu')
+            nn.init.kaiming_normal_(m.weight, a=0.01, nonlinearity='leaky_relu')
 
                     
     def forward(self, x):
@@ -278,6 +281,10 @@ def _get_block_layers(input_vars, hidden_layer_name, specs):
     hidden_layers = specs['model'].get(hidden_layer_name)
     input_layer = len(input_vars)
     if input_layer == 0:
+        if hidden_layer_name == 'layers_daily_feat_extractor':
+            logging.info(f"Input variables for {hidden_layer_name}: seasonality only!")
+            if specs['model']['use_season']:
+                return [0] + hidden_layers
         logging.info(f"No input variables specified for {hidden_layer_name}, skip block.")
         return None
     elif hidden_layers is None or len(hidden_layers) == 0:

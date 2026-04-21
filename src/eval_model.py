@@ -66,33 +66,44 @@ class ModelEvaluator():
             self.target_full_label = self.target_label
         else:
             self.target_full_label = f'{self.target_label} ({self.target_unit})'
-        
+
+        self.true = self.ds[f'{self.target_name}_true'].values.astype(np.float64)
+        self.pred = self.ds[f'{self.target_name}_pred'].values.astype(np.float64)
+
     
     def get_rmse(self):
-        true = self.ds[f'{self.target_name}_true'].values.astype(np.float64)
-        pred = self.ds[f'{self.target_name}_pred'].values.astype(np.float64)
+        return self.calc_rmse(self.true, self.pred)
+
+    @staticmethod
+    def calc_rmse(true, pred):
         mask = ~np.isnan(true) & ~np.isnan(pred)
         mse = torch.nn.MSELoss()(torch.from_numpy(true[mask]), torch.from_numpy(pred[mask]))
         return torch.sqrt(mse).item()
-    
+
     def get_mae(self):
-        true = self.ds[f'{self.target_name}_true'].values.astype(np.float64)
-        pred = self.ds[f'{self.target_name}_pred'].values.astype(np.float64)
+        return self.calc_mae(self.true, self.pred)
+
+    @staticmethod
+    def calc_mae(true, pred):
         mask = ~np.isnan(true) & ~np.isnan(pred)
         mae = torch.nn.L1Loss()(torch.from_numpy(true[mask]), torch.from_numpy(pred[mask]))
         return mae.item()
 
     def get_mbe(self):
-        true = self.ds[f'{self.target_name}_true'].values.astype(np.float64)
-        pred = self.ds[f'{self.target_name}_pred'].values.astype(np.float64)
+        return self.calc_mbe(self.true, self.pred)
+
+    @staticmethod
+    def calc_mbe(true, pred):
         mask = ~np.isnan(true) & ~np.isnan(pred)
         mbe = torch.mean(torch.from_numpy(pred[mask])-torch.from_numpy(true[mask]))
         return mbe.item()
     
     def get_r2(self):
+        return self.calc_r2(self.true, self.pred)
+
+    @staticmethod
+    def calc_r2(true, pred):
         from sklearn.metrics import r2_score
-        true = self.ds[f'{self.target_name}_true'].values.astype(np.float64).ravel()
-        pred = self.ds[f'{self.target_name}_pred'].values.astype(np.float64).ravel()
         mask = ~np.isnan(true) & ~np.isnan(pred)
         return r2_score(true[mask], pred[mask])
 
@@ -213,6 +224,11 @@ class ModelEvaluator():
                     ax.text(0.5, 0.85, f'{LABEL_PRED}: {yy_total:.0f}Gt', transform=ax.transAxes, ha='right')
                 plt.xlabel(f'{LABEL_TRUE} {self.target_full_label}')
                 plt.ylabel(f'{LABEL_PRED} {self.target_full_label}')
+        # add rmse and mae as text in figures
+        rmse = self.calc_rmse(xx, yy)
+        mae = self.calc_mae(xx,yy)
+        ax.text(.9, 0.15, f'RMSE: {rmse:.2f}', transform=ax.transAxes, ha='right')
+        ax.text(.9, 0.10, f'MAE: {mae:.2f}', transform=ax.transAxes, ha='right')
 
         # Mask high-count bins from colormap and colorbar
         masked_counts = np.ma.array(counts, mask=counts > color_threshold)
@@ -370,53 +386,88 @@ class ModelEvaluator():
             raise ValueError('Both date and year/month specified. Specifiy only one of them.')
         
         if date is not None:   # plot for one specific day
-            date_str = pd.to_datetime(date.astype('datetime64[D]').item()).strftime('%Y-%m-%d')
-            xx = data['true'].sel(time=date)
-            yy = data['pred'].sel(time=date)
+            try:
+                date_str = pd.to_datetime(date.astype('datetime64[D]').item()).strftime('%Y-%m-%d')
+            except: 
+                date_str = date.strftime('%Y-%m-%d')
+            xx = data['true'].sel(time=date, method='nearest')
+            yy = data['pred'].sel(time=date, method='nearest')
+            nr_days = 1
+            xx_daily_values = xx.values.flatten()
+            yy_daily_values = yy.values.flatten()
+            logging.info(f'Get data from datetime {xx.time.values}')
             title = f"{self.target_label} {date_str}"
             cbar_label = self.target_unit
         elif year is not None:
             ds_dates = self.ds["time"].values
             dates_per_year = [d for d in pd.to_datetime(ds_dates) if d.year==year]
             if month is not None:   # specific month of specific year
-                month_idx = datetime.strptime(month, "%B").month
-                dates_per_month = [d for d in dates_per_year if d.month==month_idx]
-                time_mask = np.isin(pd.to_datetime(ds_dates), pd.to_datetime(dates_per_month))
-                time_idx = np.where(time_mask)[0]
-                xx = data['true'].isel(time=time_idx).reduce(getattr(np, self.reduce_time), dim="time")
-                yy = data['pred'].isel(time=time_idx).reduce(getattr(np, self.reduce_time), dim="time")
-                # xx = data['true'].isel(time=time_idx).sum(dim='time', skipna=False)
-                # yy = data['pred'].isel(time=time_idx).sum(dim='time', skipna=False)
-                title = f'{self.target_label} {month} {year} ({self.reduce_time})'
-                cbar_label = self.target_unit.replace('day', 'month')
+                if isinstance(month, list):
+                    # Multiple months
+                    month_indices = [datetime.strptime(m, "%B").month for m in month]
+                    dates_per_months = [d for d in dates_per_year if d.month in month_indices]
+                    time_mask = np.isin(pd.to_datetime(ds_dates), pd.to_datetime(dates_per_months))
+                    title = f'{self.target_label} {" & ".join(month)} {year} ({self.reduce_time})'
+                    cbar_label = self.target_unit.replace('day', 'season')
+                else:
+                    # Single month (original logic)
+                    month_idx = datetime.strptime(month, "%B").month
+                    dates_per_month = [d for d in dates_per_year if d.month==month_idx]
+                    time_mask = np.isin(pd.to_datetime(ds_dates), pd.to_datetime(dates_per_month))
+                    title = f'{self.target_label} {month} {year} ({self.reduce_time})'
+                    cbar_label = self.target_unit.replace('day', 'month')
             else:  # one specific year
                 time_mask = np.isin(pd.to_datetime(ds_dates), pd.to_datetime(dates_per_year))
-                time_idx = np.where(time_mask)[0]
-                xx = data['true'].isel(time=time_idx).reduce(getattr(np, self.reduce_time), dim="time")
-                yy = data['pred'].isel(time=time_idx).reduce(getattr(np, self.reduce_time), dim="time")
                 title = f'{self.target_label} {year} ({self.reduce_time})'
                 cbar_label = self.target_unit.replace('day', 'year')
+            time_idx = np.where(time_mask)[0]
+            xx = data['true'].isel(time=time_idx)
+            yy = data['pred'].isel(time=time_idx)
+            nr_days = len(time_idx)
+            xx_daily_values = xx.values.flatten()
+            yy_daily_values = yy.values.flatten()
+            xx = xx.reduce(getattr(np, self.reduce_time), dim="time")
+            yy = yy.reduce(getattr(np, self.reduce_time), dim="time")
         elif month is not None:   # specific month (aggregated over all years in dataset)
             ds_dates = self.ds["time"].values
-            month_idx = datetime.strptime(month, "%B").month
-            dates_per_month = [d for d in pd.to_datetime(ds_dates) if d.month==month_idx]
-            time_mask = np.isin(pd.to_datetime(ds_dates), pd.to_datetime(dates_per_month))
-            time_idx = np.where(time_mask)[0]
+            if isinstance(month, list):
+                # Multiple months
+                month_indices = [datetime.strptime(m, "%B").month for m in month]
+                dates_per_month = [d for d in pd.to_datetime(ds_dates) if d.month in month_indices]
+                time_mask = np.isin(pd.to_datetime(ds_dates), pd.to_datetime(dates_per_month))
+                time_idx = np.where(time_mask)[0]
+                title = f'{self.target_label} {" & ".join(month)} '
+                cbar_label = self.target_unit.replace('day', 'season')
+            else:
+                # Single month (original logic)
+                month_idx = datetime.strptime(month, "%B").month
+                dates_per_month = [d for d in pd.to_datetime(ds_dates) if d.month==month_idx]
+                time_mask = np.isin(pd.to_datetime(ds_dates), pd.to_datetime(dates_per_month))
+                time_idx = np.where(time_mask)[0]
+                title = f'{self.target_label} {month} '
+                cbar_label = self.target_unit.replace('day', 'month')
             years = np.unique(pd.to_datetime(dates_per_month).year)
             n_years = len(years)
-            xx = data['true'].isel(time=time_idx).reduce(getattr(np, self.reduce_time), dim="time")
-            yy = data['pred'].isel(time=time_idx).reduce(getattr(np, self.reduce_time), dim="time")
-            if self.reduce_time == 'sum':
+            xx = data['true'].isel(time=time_idx)
+            yy = data['pred'].isel(time=time_idx)
+            nr_days = len(time_idx)
+            xx_daily_values = xx.values.flatten()
+            yy_daily_values = yy.values.flatten()
+            xx = xx.reduce(getattr(np, self.reduce_time), dim="time")
+            yy = yy.reduce(getattr(np, self.reduce_time), dim="time")
+            if self.reduce_time == 'sum':  # calculated monthly sums, so now we divide by nr years to get average monthly total
                 xx = xx / n_years
                 yy = yy / n_years
             if n_years == 1:  # In case whole dataset is only one year
-                title = f'{self.target_label} {month} ({self.reduce_time})'
+                title = title+f'({self.reduce_time})'
             else:
-                title = f'{self.target_label} {month} (monthly {self.reduce_time}, {str(np.min(years))}-{str(np.max(years))})'
-            cbar_label = self.target_unit.replace('day', 'month')
+                title = title+f'({self.reduce_time}; avg. across {str(np.min(years))}-{str(np.max(years))})'
         else:
             xx = data['true'].sum(dim='time', skipna=False)
             yy = data['pred'].sum(dim='time', skipna=False)
+            nr_days = len(data['time'])
+            xx_daily_values = data['true'].values.flatten()
+            yy_daily_values = data['pred'].values.flatten()
             years = np.unique(pd.to_datetime(self.ds["time"].values).year)
             if len(years)==1:
                 cbar_label = self.target_unit.replace('day', 'year')
@@ -449,7 +500,9 @@ class ModelEvaluator():
         else:
             minval_x, maxval_x, extend_colorbar_x = self._get_value_limits(min_x, max_x, value_lim)
             minval_y, maxval_y, extend_colorbar_y = self._get_value_limits(min_y, max_y, value_lim)
-            
+
+        logging.info(f"Max limits (x): {maxval_x}, {maxval_y}")
+
         # plot true
         try:
             axs[0], p0 = plot_greenland_only(xx, ax=axs[0], pcolormesh_kwargs={'cmap': cmap, 'vmin': minval_x, 'vmax': maxval_x})
@@ -459,7 +512,7 @@ class ModelEvaluator():
                 logging.info("Plot map on regular grid.")
                 p0 = axs[0].pcolormesh(xx, cmap=cmap, vmin=minval_x, vmax=maxval_x)
                 p1 = axs[1].pcolormesh(yy, cmap=cmap, vmin=minval_y, vmax=maxval_y)
-        
+
         axs[0].set_title(LABEL_TRUE)
         axs[0].set_axis_off()        
         axs[1].set_title(LABEL_PRED)
@@ -569,7 +622,38 @@ class ModelEvaluator():
                 
         tick_locator = MaxNLocator(nbins=5)
         cb3.locator = tick_locator
-        cb3.update_ticks()    
+        cb3.update_ticks()  
+
+        # add text
+        if self.target_name == 'snmel':
+            threshold = 1.
+            area_scaling_factor = 1796553.703424 / 58391 / nr_days   # transform number of pixels into km²
+            logging.info(f'Calculate mean melt extent for {nr_days} days...')
+            xx_pos = xx_daily_values[xx_daily_values>threshold]
+            xx_melt_extent = len(xx_pos)
+            axs[0].text(1., 0.0, rf'ME: {int(xx_melt_extent*area_scaling_factor)}km$\mathrm{{^2}}$', transform=axs[0].transAxes, ha='right')
+            if xx_melt_extent > 100:
+                xx_median = np.median(xx_pos)
+                axs[0].text(1., 0.12, f'med: {xx_median:.2f}', transform=axs[0].transAxes, ha='right')
+                from scipy.stats import iqr
+                xx_iqr = iqr(xx_pos)
+                axs[0].text(1., 0.06, f'IQR: {xx_iqr:.2f}', transform=axs[0].transAxes, ha='right')
+
+            yy_pos = yy_daily_values[yy_daily_values>threshold]
+            yy_melt_extent = len(yy_pos)
+            axs[1].text(1., 0.0, rf'ME: {int(yy_melt_extent*area_scaling_factor)}km$\mathrm{{^2}}$', transform=axs[1].transAxes, ha='right')
+            if xx_melt_extent > 100:
+                yy_median = np.median(yy_pos)
+                axs[1].text(1., 0.12, f'med: {yy_median:.2f}', transform=axs[1].transAxes, ha='right')
+                yy_iqr = iqr(yy_pos)
+                axs[1].text(1., 0.06, f'IQR: {yy_iqr:.2f}', transform=axs[1].transAxes, ha='right')
+
+        rmse = self.calc_rmse(xx_daily_values, yy_daily_values)
+        mae = self.calc_mae(xx_daily_values, yy_daily_values)
+        mbe = self.calc_mbe(xx_daily_values, yy_daily_values)
+        axs[2].text(1., 0.18, f'RMSE: {rmse:.2f}', transform=axs[2].transAxes, ha='right')
+        axs[2].text(1., 0.12, f'MAE: {mae:.2f}', transform=axs[2].transAxes, ha='right')
+        axs[2].text(1., 0.06, f'MBE: {mbe:.2f}', transform=axs[2].transAxes, ha='right')
 
         plt.suptitle(title)
         return axs[0]
