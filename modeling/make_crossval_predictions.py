@@ -22,7 +22,7 @@ sys.path.append(os.path.sep.join([project_dir, 'modeling']))
 import read_yaml
 from prepare_trainset import ZarrDataset
 import eval_meltNN
-
+import shutil
 
 # import local modules
 script_dir = os.path.abspath(os.path.dirname(__file__))
@@ -30,43 +30,57 @@ project_dir = os.path.sep.join([script_dir, '..'])
 sys.path.append(os.path.sep.join([project_dir , 'src']))
 import logging_config
 from create_dataset import FirnpackCellsDataset, my_collate_fn
+from my_utils import AffinityInitializer, shutdown_dataloader
 import predictor
 
-
-# Create predictions for 1990-2016
-
-# define which model to use
-out_dir = os.path.sep.join(['dmidata', 'projects', 'smb_and_polar_rcm', 'elkesc', 'output', 'Crossval', 'crossval_ERAI_modularNNEBM'])
-data_dir = os.path.sep.join(['dmidata', 'users', 'elkesc', 'MeltEmulation', 'data', 'processed', 'crossval', 'v_01', 'ERAI_meltNN', 'data.zarr'])
-
-RECONSTRUCT_COORDS = False
+import multiprocessing as mp
 
 
-# only few models and 2 years for testing purpose
-years = [1992, 1994]
-iters = range(2)
-dates = (pd.date_range(start="1990-01-01", end="1991-12-31")+pd.Timedelta(hours=12)).tolist()
 
-for y in years:
-    for it in iters:
+if __name__ == "__main__":
+    try:
+        mp.set_start_method("spawn")
+        logging.info("Set multiprocessing start method to 'spawn'.")
+    except RuntimeError:     
+        pass
+
+    # Create predictions for 1990-2016
+
+    # define which model to use
+    out_dir = os.path.sep.join(['/dmidata', 'projects', 'smb_and_polar_rcm', 'elkesc', 'output', 'Crossval', 'crossval_CESM2_modularNNEBM'])
+    data_dir = os.path.sep.join(['/dmidata', 'users', 'elkesc', 'MeltEmulation', 'data', 'processed', 'crossval', 'v_01', 'ERAI_meltNN', 'data.zarr'])
+
+
+    #out_dir = os.path.sep.join([project_dir, 'output', 'crossval_ERAI_modularNNEBM_stabilized'])
+
+    logging_config.define_root_logger(os.path.join(out_dir, f'log_predictions_ERAIdata_CESMmodel.txt'))
+    logging.getLogger().setLevel(logging.INFO)
+
+    RECONSTRUCT_COORDS = False  # to save space?
+
+    # only few models and 2 years for testing purpose
+    years = range(1992, 2017, 2)
+    iters = range(5)
+    dates = (pd.date_range(start="1990-01-01", end="2016-12-31")+pd.Timedelta(hours=12)).tolist()
+
+    for y in years:
         fold = f'fold_{y}'
-        
-        model_dir = os.path.sep.join([out_dir, fold, f'iter_{it}'])
-        specs = read_yaml.read_yaml_file(os.path.sep.join([model_dir, 'specs.yml']))
+        model_dir = os.path.sep.join([out_dir, fold])
+        scalerpath = os.path.sep.join([model_dir, 'std_scaler.npz'])
+
+        specs = read_yaml.read_yaml_file(os.path.sep.join([model_dir, f'iter_{iters[0]}',  'specs.yml']))
 
         zarrset = ZarrDataset(specs)
         var_dict = zarrset.get_variable_dict()
-
-        scalerpath = os.path.sep.join([model_dir, '..', 'std_scaler.npz'])
+        # data_dir = os.path.sep.join([project_dir, specs['directories']['base_dir'], specs['directories']['data_file'], 'data.zarr'])
         val_data = FirnpackCellsDataset(data_dir, dates=dates, variable_names=var_dict, scaling=scalerpath)
 
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         logging.info(f'Using device {device}')   
-        # dataloader = DataLoader(val_data, batch_size=32, shuffle=False, collate_fn=my_collate_fn, num_workers=4, persistent_workers=True,
-        #                             pin_memory=pin_memory, worker_init_fn=AffinityInitializer(base_offset=12, cores_per_worker=1))
-        dataloader = DataLoader(val_data, batch_size=32, shuffle=False, collate_fn=my_collate_fn, num_workers=0)
-
-        model_predictor = predictor.ModelPredictor(model_dir, var_dict, dataloader, filedir=os.path.sep.join([model_dir, 'pred_data.zarr']), load='best', device=device)
+        dataloader = DataLoader(val_data, batch_size=366, shuffle=False, collate_fn=my_collate_fn, num_workers=4, prefetch_factor=2,
+                                persistent_workers=True, worker_init_fn=AffinityInitializer(base_offset=0, cores_per_worker=4))
+        # dataloader = DataLoader(val_data, batch_size=32, shuffle=False, collate_fn=my_collate_fn, num_workers=0)
+        
         x_coords = xr.open_zarr(val_data.file_dir)['x'].values
         y_coords = xr.open_zarr(val_data.file_dir)['y'].values
         
@@ -88,7 +102,52 @@ for y in years:
                 logging.error(f"Could not read coordinates from reference file {coords_file}: {e}")
                 raise ValueError(f"Could not read coordinates from reference file {coords_file}: {e}")
 
+        for it in iters:
+            
+            
+            model_iter_dir = os.path.sep.join([model_dir, f'iter_{it}'])
 
-        model_predictor.make_predictions_file(coords=(x_coords, y_coords), 
-                                                ref_coords=xy_coords_ref, 
-                                                extra_coords=lonlat_coords_ref)
+            model_predictor = predictor.ModelPredictor(model_iter_dir, var_dict, dataloader, filedir=os.path.sep.join([model_iter_dir, 'pred_data.zarr']), load='best', device=device)
+
+            model_predictor.make_predictions_file(coords=(x_coords, y_coords), 
+                                                    ref_coords=xy_coords_ref, 
+                                                    extra_coords=lonlat_coords_ref)
+
+        
+        shutdown_dataloader(dataloader)
+        val_data.close()
+        del val_data 
+        
+        # merge all predictions across the iterations in one file
+        filedir = os.path.sep.join([out_dir, fold, 'pred_data_ERAI.zarr'])
+
+        for it in iters:
+            model_dir = os.path.sep.join([out_dir, fold, f'iter_{it}'])
+            file_iter = os.path.sep.join([model_dir, 'pred_data_ERAI.zarr'])
+
+            if not os.path.exists(filedir):
+                # copy file of first iteration
+                if os.path.exists(file_iter):
+                    # get file of first model but rename variable name snmel_pred
+                    logging.info(f'Copying predictions from {file_iter} to {filedir} ...')
+                    ds = xr.load_dataset(file_iter)
+                    ds_true = ds[['snmel_true']]
+                    ds_pred = ds[['snmel_pred']].expand_dims(iteration=[it])
+                    ds_merged = xr.merge([ds_true, ds_pred])
+                    ds_merged.to_zarr(filedir)
+                else:
+                    logging.warning(f'First iteration predictions file {file_iter} does not exist.')
+            else:
+                if os.path.exists(file_iter):
+                    logging.info(f'Appending predictions from {file_iter} to {filedir} ...')
+                    ds = xr.load_dataset(file_iter)[['snmel_pred']]
+                    ds_pred = ds[['snmel_pred']].expand_dims(iteration=[it])
+                    ds_pred.to_zarr(filedir, mode='a', append_dim='iteration')
+                else:
+                    logging.warning(f'First iteration predictions file {file_iter} does not exist.')
+
+
+            try:
+                shutil.rmtree(file_iter)
+            except Exception:
+                pass
