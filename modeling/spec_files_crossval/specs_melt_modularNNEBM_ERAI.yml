@@ -2,7 +2,7 @@
 
 directories:
   base_dir: data/processed/crossval/v_01
-  data_file: ERAI_meltNN_10yrlog
+  data_file: ERAI_meltNN
   out_dir: output/crossval_ERAI_modularNNEBM_stabilized
   overwrite: false
   temp_sub_file: temp_subsample_100.json
@@ -25,8 +25,8 @@ data:
   transform_inputs:
     rainfall: [log,1]
     snfall: [log,1]
-    rainfall_10yr-avg: [log,1]
-    snfall_10yr-avg: [log,1]
+    # rainfall_10yr-avg: [log,1]
+    # snfall_10yr-avg: [log,1]
 
 model:
   hidden_activation: LeakyReLU
