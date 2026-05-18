@@ -20,6 +20,7 @@ from dask.diagnostics import ProgressBar
 import numpy as np
 import pandas as pd
 from scipy.special import boxcox
+from scipy.stats import yeojohnson
 import xarray as xr
 
 # import local modules
@@ -111,14 +112,20 @@ class ZarrDataset():
         def get_lags(vars_list, start_day, nr_entities, days_per_entity):
             new_names = []
             for v in vars_list:
-                for lag_day in range(start_day, nr_entities * days_per_entity + start_day, days_per_entity):
-                    if '_mask' in v:   # if var is a mask, add '_mask'-suffix at the very end of new variable name
-                        new_name = f"{v.replace('_mask','')}_d-{lag_day}_mask"
-                    else:
-                        new_name = f"{v}_d-{lag_day}"
-                    historic_specs.append((v, lag_day, new_name))
-                    logging.debug(f"  add {new_name} for {v} with lag {lag_day} days")
-                    new_names.append(new_name)
+                if v not in ['lat', 'lon']:
+                    for lag_day in range(start_day, nr_entities * days_per_entity + start_day, days_per_entity):
+                        if '_mask' in v:   # if var is a mask, add '_mask'-suffix at the very end of new variable name
+                            new_name = f"{v.replace('_mask','')}_d-{lag_day}_mask"
+                        else:
+                            new_name = f"{v}_d-{lag_day}"
+                        historic_specs.append((v, lag_day, new_name))
+                        logging.debug(f"  add {new_name} for {v} with lag {lag_day} days")
+                        new_names.append(new_name)
+                # else:
+                #     historic_specs.append((v, 0, v))
+                #     logging.debug(f"  add {v}")
+                #     new_names.append(v)
+
             return new_names
         
         # Daily lags
@@ -162,10 +169,12 @@ class ZarrDataset():
     def add_historic_data(self, _ds):        
         for original_var, lag_day, new_name in self.historic_specs :
             if original_var in _ds:
-                logging.info(f"Adding data for {new_name} from {lag_day} days before target date ...")
-                _ds[new_name] = _ds[original_var].shift(time=lag_day)
+                if 'time' in _ds[original_var].dims:
+                    logging.info(f"Adding data for {new_name} from {lag_day} days before target date ...")
+                    _ds[new_name] = _ds[original_var].shift(time=lag_day)
             else:
                 logging.error(f"Variable {original_var} not found in dataset, skipping {new_name}")
+        print(list(_ds.variables))
         return _ds
 
 
@@ -350,7 +359,8 @@ class ZarrDataset():
 
 
 
-    def prepare_prediction_file(self, dates, daily_file, medrange_file=None, spinup_file=None, scaler_file=None, use_spatial_subsampling=False, savedir='./predictions.zarr'):
+    def prepare_prediction_file(self, dates, daily_file, medrange_file=None, spinup_file=None, scaler_file=None, 
+                                use_spatial_subsampling=False, chunksize=None, savedir='./predictions.zarr'):
         """
         Create zarr from basefile for making prediction from new data
         """
@@ -400,8 +410,8 @@ class ZarrDataset():
                 self.ds = xr.merge([self.ds, spinup_data])
         
         logging.info(f'Merged time coordinates: {self.ds.time.values}')
-        self.ds = self.ds.assign_coords(dayofyear=("time", self.ds.time.dt.dayofyear.data))         
-
+        self.ds = self.ds.assign_coords(dayofyear=("time", self.ds.time.dt.dayofyear.data))  
+        
         # clip variable data if specified in specs
         if 'clipping' in self.data_specs:
             self.clip_vars(self.data_specs['clipping'])
@@ -431,6 +441,14 @@ class ZarrDataset():
         logging.info("  finished rechunking.")
         
         self.ds = self.add_historic_data(self.ds)
+
+        for varname in ['lat', 'lon']:
+            if varname in self.variables_daily:
+                data_values = self.ds[varname].values
+                self.ds = self.ds.reset_coords([varname], drop=True)
+                self.ds = self.ds.assign({varname: ("z", data_values)})
+
+        print(self.ds)
         
         # select only needed variables
         self.ds = self.ds[self.variables_full]
@@ -441,9 +459,9 @@ class ZarrDataset():
             self.load_scaler(scaler_file)
             self.ds = self.apply_scaling(self.ds)
 
-        self.ds = self.restructure_dataset(self.ds)
+        self.ds = self.restructure_dataset(self.ds, chunksize)
         
-        logging.info(f"Save data to {savedir} ...")
+        logging.info(f"Save data with variables {self.ds.variable_names.values} to {savedir} ...")
         self.save_dataset(self.ds, savedir, self.batch_size)
     
         daily_data.close()
@@ -539,6 +557,10 @@ class ZarrDataset():
                 logging.info(f'  transform {var} using box-cox with lambda={transf_param}')
                 #self.ds[var] = xr.apply_ufunc(self.box_cox, self.ds[var], transf_param, dask='parallelized')
                 self.ds[var] = xr.apply_ufunc(boxcox, self.ds[var], transf_param, input_core_dims=[[], []], dask='parallelized')
+            elif transf_fct == 'yeo':
+                logging.info(f'  transform {var} using Yeo-Johnson with lambda={transf_param}')
+                #self.ds[var] = xr.apply_ufunc(self.box_cox, self.ds[var], transf_param, dask='parallelized')
+                self.ds[var] = xr.apply_ufunc(yeojohnson, self.ds[var], transf_param, input_core_dims=[[], []], dask='parallelized')
             else:
                 logging.error(f'  transformation ({transf_fct},{transf_param}) for {var} is invalid!')
     
@@ -548,17 +570,24 @@ class ZarrDataset():
         self.scaler_vals = dict.fromkeys(self.variables_full_contd)
         for v in self.variables_contd:
             vars_group = [var for var in self.variables_full_contd if re.fullmatch(rf'{v}(_d-\d+)?', var)]
-            logging.info(f"    fit standard scaler on {v} for variable group {vars_group}...")                                
+            # logging.info(f"    fit standard scaler on {v} for variable group {vars_group}...")
+            logging.info(f"    fit robust scaler on {v} for variable group {vars_group}...")                                   
             combined = _ds[v]
-            combined_mean = combined.mean().compute().item()
-            combined_std = combined.std().compute().item()
+            # combined_mean = combined.mean().compute().item()
+            # combined_std = combined.std().compute().item()
+            combined_median = combined.quantile(0.5).compute().item()
+            q1 = combined.quantile(0.25).compute().item()
+            q3 = combined.quantile(0.75).compute().item()
+            combined_iqr = q3 - q1      
             for vg in vars_group:
-                self.scaler_vals[vg] = (combined_mean, combined_std)         
+                # self.scaler_vals[vg] = (combined_mean, combined_std)   
+                self.scaler_vals[vg] = (combined_median, combined_iqr)      
         
         logging.info("  resulting mean and std per variable:")
         for v,m in self.scaler_vals.items():
             logging.info(v)
-            logging.info(f"  {v}:   mean={m[0]}, std={m[1]}")
+            # logging.info(f"  {v}:   mean={m[0]}, std={m[1]}")
+            logging.info(f"  {v}:   median={m[0]}, iqr={m[1]}")
 
         filepath = os.path.sep.join([self.file_dir, 'std_scaler.npz'])
         logging.info(f'  Save scaling parameters in: {filepath}.')
@@ -615,11 +644,17 @@ class ZarrDataset():
         return _ds
 
 
-    def restructure_dataset(self, _ds):
+    def restructure_dataset(self, _ds, chunksize=None):
         logging.info('  reshape dataset to dataarray... ')
         _ds = _ds.to_array(dim='variable_names')
         _ds.name = "data"
-        _ds = _ds.chunk({"time": 1, "z": -1, "variable_names": -1})
+        chunks = {"time": 1, "z": -1, "variable_names": -1}
+        if chunksize is not None:
+            for dim, ch in chunks.items():
+                if dim in chunks.keys():
+                    chunks[dim] = ch
+
+        _ds = _ds.chunk(chunks)
         _ds = _ds.transpose('time', 'z', 'variable_names')
         return _ds
         
