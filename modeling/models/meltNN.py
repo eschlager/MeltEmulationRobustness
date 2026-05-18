@@ -39,7 +39,8 @@ class NN(nn.Module):
         layers_spinup=None,
         use_season=True,
         trunoff=False,
-        n_auto=0
+        n_auto=0,
+        dropout_rate = 0.
     ):
         super().__init__()
         self.targets = targets
@@ -52,6 +53,7 @@ class NN(nn.Module):
         self.use_season = use_season
         self.trunoff = trunoff
         self.n_auto = n_auto
+        self.dropout_rate = dropout_rate
 
         # specify seasonality look-up table
         if self.use_season:
@@ -201,14 +203,14 @@ class NN(nn.Module):
             nr_inputs += 1
         
         layers_regressor = [nr_inputs] + self.layers_regressor
-        self.regressor = NNBlock(layers_regressor, hidden_act=self.hidden_activation, use_batchnorm=False)
+        self.regressor = NNBlock(layers_regressor, hidden_act=self.hidden_activation, use_batchnorm=False, use_dropout=True)
         
         # define final heads for each target
         self.reg_heads = nn.ModuleDict()
         for i,target in enumerate(self.targets):  
             # add one hidden layer per target
             linear1 = nn.Linear(layers_regressor[-1], layers_regressor[-1])
-            nn.init.kaiming_normal_(linear1.weight, a=0.01, nonlinearity='leaky_relu')
+            nn.init.kaiming_normal_(linear1.weight, a=0.1, nonlinearity='leaky_relu')
             activation1 = getattr(nn, self.hidden_activation)()
             
             # add output layer for each target
@@ -224,7 +226,7 @@ class NN(nn.Module):
             elif self.output_activation[target] == 'Sigmoid':  # use linear activation for classification and BCEwithLogitsLoss, i.e. actually Sigmoid activation!
                 nn.init.xavier_normal_(linear2.weight)   
             else: 
-                nn.init.kaiming_normal_(linear2.weight, a=0.01, nonlinearity='leaky_relu')       
+                nn.init.kaiming_normal_(linear2.weight, a=0.1, nonlinearity='leaky_relu')       
             
             if (self.output_activation[target] == 'Sigmoid') or (self.output_activation[target] == ''):
                 # do not use output activation for BCEwithLogits
@@ -250,7 +252,7 @@ class NN(nn.Module):
         
         
 class NNBlock(nn.Module): 
-    def __init__(self, layers, hidden_act, use_batchnorm=False):
+    def __init__(self, layers, hidden_act, use_batchnorm=False, use_dropout=False):
         super().__init__()
         
         hidden_activation = getattr(nn, hidden_act)()
@@ -262,6 +264,9 @@ class NNBlock(nn.Module):
                 if use_batchnorm:
                     self.linears.append(nn.BatchNorm1d(layers[i+1]))
                 self.linears.append(hidden_activation)
+
+                if use_dropout and layers[i+1] > 64: 
+                    self.linears.append(nn.Dropout(p=self.dropout_rate))
 
         self.apply(self._initialize_weights)  
          
