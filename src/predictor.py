@@ -55,7 +55,7 @@ class ModelPredictor():
         self.nr_samples = dataloader.dataset.nr_samples
         logging.info(f'Number of samples in dataset: {self.nr_samples}.')
         batch_size = self.dataloader.batch_size
-        self.chunk_size = 1000
+        self.chunk_size = 100
         if self.chunk_size > self.nr_samples/batch_size:
             self.chunk_size = int(np.ceil((self.nr_samples/batch_size)))
         
@@ -114,7 +114,7 @@ class ModelPredictor():
                 self._make_raw_predictions(inference_mode)  # make and store raw predictions
             except Exception:
                 try:
-                    del raw_group
+                    raw_group = None
                     shutil.rmtree(self.rawpredictions_file)
                 except Exception:
                     pass
@@ -124,11 +124,8 @@ class ModelPredictor():
             logging.info(f'Post-process raw predictions ...')
             ds_xr = self._create_dataset(raw_group)
 
-            # handle missing data: drop time steps where predictions for all locations are nan
             nan_mask = ~ds_xr[self.targets[0]+'_pred'].isnull().all(dim=["z"]).compute()
             ds_xr = ds_xr.isel(time=nan_mask)
-
-            # ds_xr = ds_xr.where(nan_mask, 0.)   # alternatively, fill with zero (for no melt; valid if start predictions in winter)
 
             ds_xr = ds_xr.set_index(z=['y', 'x']).unstack('z')
             if ref_coords is not None:
@@ -155,7 +152,7 @@ class ModelPredictor():
                 compute=True,
                 consolidated=True,
                 encoding={
-                    var: {"chunks": ds_xr[var].data.chunksize, "compressor": None}
+                    var: {"chunks": ds_xr[var].data.chunksize,}
                     for var in ds_xr.data_vars
                 }
             )
@@ -168,10 +165,12 @@ class ModelPredictor():
                 
             try:
                 if raw_group is not None:
-                    store = getattr(raw_group, 'store', None)
-                    if store is not None and hasattr(store, 'close'):
-                        store.close()
-                    raw_group.store.close()  # Add explicit close
+                    for key in list(raw_group['data'].keys()):
+                        try:
+                            raw_group['data'][key] = None
+                        except Exception:
+                            pass
+                    raw_group = None
             except Exception:
                 pass
 
@@ -243,16 +242,7 @@ class ModelPredictor():
                 dtype=np.float32,
                 chunks=(self.chunk_size, self.nr_z),
                 overwrite=True
-        )
-
-        # self.doy = zarr_file.create_array(
-        #     'data/doy', 
-        #     shape=(self.nr_time),  
-        #     dtype=np.float32,
-        #     chunks=(self.chunk_size, ),
-        #     overwrite=True
-        # )
-        
+        )        
         self.x = zarr_file.create_array(
             'data/x', 
             shape=(self.nr_z),  
@@ -292,9 +282,7 @@ class ModelPredictor():
 
     
     def _flush_buffer(self, start_idx):
-        if self.buffer_count > 0:
-            # self.doy[start_idx : start_idx + self.buffer_count] = self.buffer_doy[:self.buffer_count]
-            
+        if self.buffer_count > 0:            
             for j,var in enumerate(self.targets):
                 self.real_values[var][start_idx : start_idx + self.buffer_count,:] = self.buffer_real[:self.buffer_count,:,j]
                 self.pred_values[var][start_idx : start_idx + self.buffer_count,:] = self.buffer_pred[:self.buffer_count,:,j]
@@ -326,13 +314,11 @@ class ModelPredictor():
         total_batches = len(self.dataloader)
         self.buffer_pred = np.empty((BUFFERSIZE, self.nr_z, len(self.targets)), dtype=np.float32)
         self.buffer_real = np.empty((BUFFERSIZE, self.nr_z, len(self.targets)), dtype=np.float32)
-        # self.buffer_vars = np.empty((self.chunk_size, len(self.specs['input'])), dtype=np.float32)
-        #self.buffer_doy = np.empty((BUFFERSIZE,), dtype=np.float32)
         self.buffer_count = 0
         start_index = 0
 
         for i, (x_daily, x_medrange, x_spinup, y, y_prev, trunoff_map, doy, idx) in enumerate(self.dataloader, start=1):
-            batchsize = int(x_daily.size(1)/self.nr_z)   #1  # only implemented for batchsize=1 for now!
+            batchsize = int(x_daily.size(1)/self.nr_z)
             # if next batch would exceed the time chunk size, flush the buffer to zarr file
             if self.buffer_count + batchsize > BUFFERSIZE:
                 logging.info(f"  Flush buffer to zarr file at index {start_index} with {self.buffer_count} entries.")
@@ -392,16 +378,10 @@ class ModelPredictor():
 
             output = self.model.inference(x_daily, x_medrange, x_spinup, y_prev, trunoff_map, doy)
 
-            # if (doy == doy[0]).all():
-            #     doy_value = doy[0].item()
-            # else:
-            #     raise ValueError("DOY tensor contains multiple values!")
-            #self.buffer_doy[self.buffer_count:self.buffer_count+batchsize] = doy_value
             self.buffer_real[self.buffer_count:self.buffer_count+batchsize,:,:] = y.cpu().numpy().reshape(batchsize, self.nr_z, len(self.targets))
             self.buffer_pred[self.buffer_count:self.buffer_count+batchsize,:,:] = output.cpu().numpy().reshape(batchsize, self.nr_z, len(self.targets))
             self.buffer_count += batchsize
             
-        # flush the remaining buffer to the zarr file 
         if self.buffer_count > 0:
             logging.info(f"  Flush buffer to zarr file at index {start_index} with {self.buffer_count} entries.")
             self._flush_buffer(start_index)
@@ -442,15 +422,15 @@ class ModelPredictor():
                 logging.info(f'Scale target variable {target} back to original range...')
                 scale_mean, scale_std = self.scaler[target]
                 # Dask-backed array from Zarr
-                mean_val = true.mean().compute().item()
-                std_val = true.std().compute().item()
-                logging.info(f'Mean value of true variable {target}: {mean_val}, std value: {std_val}')
+                # mean_val = true.mean().compute().item()
+                # std_val = true.std().compute().item()
+                # logging.info(f'Mean value of true variable {target}: {mean_val}, std value: {std_val}')
                 
                 logging.info(f'Reverse scaling for target variable {target} with mean {scale_mean} and std {scale_std}')
                 true = true * scale_std + scale_mean
-                mean_val = true.mean().compute().item()
-                std_val = true.std().compute().item()
-                logging.info(f'Mean value of true variable {target} after reverse scaling: {mean_val}, std value: {std_val}')
+                # mean_val = true.mean().compute().item()
+                # std_val = true.std().compute().item()
+                # logging.info(f'Mean value of true variable {target} after reverse scaling: {mean_val}, std value: {std_val}')
             if self.transform_targets:
                 if target in self.specs['data']['transform_targets']:
                     transf_fct, transf_param = self.specs['data']['transform_targets'][target]
@@ -462,15 +442,15 @@ class ModelPredictor():
             
 
             pred = xr.DataArray(da.from_zarr(ds[f'data/{target}_pred']))
-            mean_val = pred.mean().compute().item()
-            std_val = pred.std().compute().item()
-            logging.info(f'Mean value of pred variable {target}: {mean_val}, std value: {std_val}')
+            # mean_val = pred.mean().compute().item()
+            # std_val = pred.std().compute().item()
+            # logging.info(f'Mean value of pred variable {target}: {mean_val}, std value: {std_val}')
             if target in self.scaler:
                 logging.info(f'Scale predicted variable {target} back to original range...')
                 pred = pred * scale_std + scale_mean
-                mean_val = pred.mean().compute().item()
-                std_val = pred.std().compute().item()
-                logging.info(f'Mean value of pred variable {target} after reverse scaling: {mean_val}, std value: {std_val}')
+                # mean_val = pred.mean().compute().item()
+                # std_val = pred.std().compute().item()
+                # logging.info(f'Mean value of pred variable {target} after reverse scaling: {mean_val}, std value: {std_val}')
             if self.transform_targets:
                 if target in self.specs['data']['transform_targets']:
                     transf_fct, transf_param = self.specs['data']['transform_targets'][target]
@@ -482,8 +462,7 @@ class ModelPredictor():
         ds_xr = xr.Dataset(
             {
                 **true_vars,
-                **pred_vars,
-                #'doy': (['time'], ds['data/doy'][:])
+                **pred_vars
             },
             coords={
                 'time': ('time', ds['data/time'][:].astype('datetime64[ns]')),
@@ -515,7 +494,7 @@ class ModelPredictor():
             try:
                 with np.load(self.scaler_path) as npz:
                     self.scaler = {k: npz[k].copy() for k in npz.files}
-                logging.info(f"Load scaler file {self.scaler_path}")
+                    logging.info(f"Load scaler file {self.scaler_path}")
                 break  # Success, stop trying
             except FileNotFoundError:
                 continue
