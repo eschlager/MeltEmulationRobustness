@@ -10,11 +10,9 @@ import os
 import gc
 import xarray as xr
 import sys
-from dask.diagnostics import ProgressBar
 import pandas as pd
 from torch.utils.data import DataLoader
 import torch
-import matplotlib.pyplot as plt
 script_dir = os.path.abspath(os.path.dirname(__file__))
 project_dir = os.path.sep.join([script_dir, '..'])
 sys.path.append(os.path.sep.join([project_dir , 'src']))
