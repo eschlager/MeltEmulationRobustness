@@ -2,8 +2,8 @@
 
 directories:
   base_dir: data/processed/crossval/v_01
-  data_file: ERAI_meltNN
-  out_dir: output/crossval_ERAI_modularNNEBM_noshuffle
+  data_file: ERAI_meltNN_albedolatlon
+  out_dir: output/crossval_ERAI_modularNNEBM_noshuffle_latlon
   overwrite: false
   temp_sub_file: temp_subsample_100.json
   spatial_sub_file: GRL_subsampleidx_5000_flattened.zarr
@@ -11,6 +11,7 @@ directories:
 
 data:
   input:
+  #- albedom
   - rainfall
   - snfall
   - energyin
@@ -19,6 +20,8 @@ data:
   - snfall_10yr-avg
   - energyin_10yr-avg
   - dswrad_10yr-avg
+  - lat
+  - lon
   prec_days: 9
   target:
   - snmel
@@ -50,10 +53,10 @@ model:
 training:
   restarts: 20
   batch_size: 256
-  continue_training: true
+  continue_training: false
   epochs: 300
   loss_reg: mse
-  lr: 0.01
+  lr: 0.03
   lr_decay: 0.9
   lr_decay_epochs: 50
   optimizer: adam

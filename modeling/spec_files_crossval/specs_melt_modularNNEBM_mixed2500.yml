@@ -3,7 +3,7 @@
 directories:
   base_dir: data/processed/crossval/v_01
   data_file: ERAI_CESM2_meltNN
-  out_dir: output/crossval_ERAICESM2_2500_modularNNEBM
+  out_dir: output/crossval_ERAICESM2_2500_modularNNEBM_continued
   overwrite: false
   temp_sub_file: temp_subsample_100.json
   spatial_sub_file: GRL_subsampleidx_2500_flattened.zarr

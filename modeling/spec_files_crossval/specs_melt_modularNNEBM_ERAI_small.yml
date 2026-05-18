@@ -3,7 +3,7 @@
 directories:
   base_dir: data/processed/crossval/v_01
   data_file: ERAI_meltNN
-  out_dir: output/crossval_ERAI_modularNNEBM_noshuffle
+  out_dir: output/crossval_ERAI_modularNNEBM_noshuffle_smallNN
   overwrite: false
   temp_sub_file: temp_subsample_100.json
   spatial_sub_file: GRL_subsampleidx_5000_flattened.zarr
@@ -33,14 +33,13 @@ model:
   layers_daily_feat_extractor:
   - 128
   - 128
-  - 256
+  - 128
   layers_medrange_feat_extractor: null
   layers_regressor:
-  - 256
+  - 160
+  - 128
   - 128
   - 64
-  - 32
-  - 16
   layers_spinup_feat_extractor:
   - 32
   - 32
@@ -49,11 +48,11 @@ model:
 
 training:
   restarts: 20
-  batch_size: 256
-  continue_training: true
-  epochs: 300
+  batch_size: 512
+  continue_training: false
+  epochs: 500
   loss_reg: mse
-  lr: 0.01
+  lr: 0.03
   lr_decay: 0.9
   lr_decay_epochs: 50
   optimizer: adam
