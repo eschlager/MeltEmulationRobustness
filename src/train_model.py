@@ -107,7 +107,7 @@ class ModelTrainer():
             
 
         if self.train_specs['optimizer'] == 'adam':
-            self.optimizer = torch.optim.AdamW(params_to_optimize, lr=self.train_specs['lr']) 
+            self.optimizer = torch.optim.AdamW(params_to_optimize, lr=self.train_specs['lr'], eps=1e-6) 
         else:
             raise ValueError(f"Optimizer {self.train_specs['optimizer']} not implemented.")
         
@@ -234,14 +234,17 @@ class ModelTrainer():
                 total_samples = 0
                 self.model.train()
 
+                # To use adapting roll-out window during training
                 if epoch > 1: # increase rate of autoregressive samples every 30 epochs
+                    train_iter = iter(self.dataloader_train)
+                    _, _, _, y, _, _, _, _ = next(train_iter)
+                    sequ_len = y.size(0)
                     if sequ_len >1 and self.auto_mode:
                         if epoch % 30 == 0 and autoreg_rate < 1:
                             autoreg_rate += 0.1
-                            # logging.info(f'Use {autoreg_rate*100}% auto-regressive previous day inputs for training.')
-                            logging.info(f'Use full roll-out window for {autoreg_rate*100}% of smaples.')
+                            logging.info(f'Use full roll-out window for {autoreg_rate*100}% of samples.')
                             
-                train_iter = iter(self.dataloader_train) 
+                
                 for x_daily, x_medrange, x_spinup, y, y_prev, trunoff_map, doy, idx in train_iter:
                     x_daily, x_medrange, x_spinup, y, y_prev, trunoff_map = self.to_device(
                                 x_daily, x_medrange, x_spinup, y, y_prev, trunoff_map)
