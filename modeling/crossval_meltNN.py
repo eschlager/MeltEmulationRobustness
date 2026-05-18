@@ -100,13 +100,15 @@ def mk_my_outdir(specs):
     os.makedirs(out_dir_abs)
     if 'continue_training' in specs['training']:
         if specs['training']['continue_training']:
-            # shutil.copytree(source_dir, out_dir_abs)
-            for filename in glob.glob(os.path.join(source_dir, '*.*')):
-                try:
-                    _, fname = os.path.split(filename)
-                    shutil.copy2(filename, os.path.join(out_dir_abs, fname))
-                except:
-                    pass
+            for root, dirs, files in os.walk(source_dir):
+                # Calculate the destination directory
+                rel_path = os.path.relpath(root, source_dir)
+                dest_dir = os.path.join(out_dir_abs, rel_path)
+                os.makedirs(dest_dir, exist_ok=True)
+                for file in files:
+                    src_file = os.path.join(root, file)
+                    dest_file = os.path.join(dest_dir, file)
+                    shutil.copy2(src_file, dest_file)
 
     return out_dir_new, out_dir_abs
 
@@ -157,7 +159,7 @@ def perform_training(specs):
         zarrset.check_file(file_name)
         logging.info('   succesful!')
     except (FileNotFoundError, KeyError) as e:
-        zarrset.prepare_prediction_file(dates, daily_file, spinup_file=spinup_file, savedir=os.path.sep.join([file_dir, file_name]))
+        zarrset.prepare_prediction_file(dates, daily_file, spinup_file=spinup_file, chunksize={"time":32}, savedir=os.path.sep.join([file_dir, file_name]))
     except:
         logging.error(f"There is a problem with the file {file_name} - please check!")
         os._exit(0)
@@ -184,14 +186,6 @@ def perform_training(specs):
         data_dates = pd.DatetimeIndex(ds['time'].values)
     data_years = data_dates.year
 
-    # def time_series_cv_split(data_dates, sub_dates, stop_year, val_year):
-    #     # use only sub-sampled dates for training
-    #     train_dates = [d for d in sub_dates if d.year not in [val_year, stop_year]]
-    #     stop_dates = [d for d in sub_dates if d.year == stop_year]
-    #     # use all available dates for validation set
-    #     val_dates = [d for d in data_dates if d.year == val_year]
-    #     return train_dates, stop_dates, val_dates
-
     # stop_years = [2014, 2012, 2010, 2008, 2006, 2004, 2002, 2000, 1998, 1996, 1994, 1992, 1990]
     # val_years = [2016, 2014, 2012, 2010, 2008, 2006, 2004, 2002, 2000, 1998, 1996, 1994, 1992]
     # assert np.isin(val_years, data_years.values).all(), "Validation years must be in the dataset."
@@ -209,8 +203,8 @@ def perform_training(specs):
         return train_dates, stop_dates, val_dates
 
     # stop_years = [2012, 2010, 2008, 2006, 2004, 2002, 2000, 1998, 1996, 1994, 1992]
-    val_years = [2014, 2012, 2010, 2008, 2006, 2004, 2002, 2000, 1998, 1996, 1994, 1992]
-    stop_years = [[1990, 2003, 2016]]*len(val_years)
+    val_years = [1996, 2004]
+    stop_years = [1996, 2004]
     assert np.isin(val_years, data_years.values).all(), "Validation years must be in the dataset."
     assert np.isin(stop_years, data_years.values).all(), "Stop years must be in the dataset."
 
@@ -223,7 +217,7 @@ def perform_training(specs):
     logging.shutdown()
     for foldnr, (stop_year, val_year) in enumerate(zip(stop_years, val_years)):
         out_dir_fold = os.path.abspath(os.path.sep.join([out_dir_abs, f'fold_{val_year}']))
-        os.makedirs(out_dir_fold)
+        os.makedirs(out_dir_fold, exist_ok=True)
         logging_config.define_root_logger(os.path.join(out_dir_fold, f'log.txt'))
         logging.getLogger().setLevel(logging.INFO)
 
@@ -247,8 +241,19 @@ def perform_training(specs):
 
         logging.info('Initialize DataLoaders ...')
         pin_memory = device.type == 'cuda'   # pin_memory if using GPU; if use pin_memory with CPU it just creates overhead!
-        train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True, collate_fn=my_collate_fn, num_workers=8, persistent_workers=True,
+        
+        # shuffle training data once and then keep order fixed during training
+        import random
+        random.seed(42)
+        shuffled_indices = list(range(len(train_data)))
+        random.shuffle(shuffled_indices)
+        shuffled_train_data = torch.utils.data.Subset(train_data, shuffled_indices)
+        train_dataloader = DataLoader(shuffled_train_data, batch_size=batch_size, shuffle=False, collate_fn=my_collate_fn, num_workers=8, persistent_workers=True,
                                     pin_memory=pin_memory, worker_init_fn=AffinityInitializer(base_offset=1, cores_per_worker=1, name='train'))
+        
+        
+        # train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True, collate_fn=my_collate_fn, num_workers=8, persistent_workers=True,
+        #                             pin_memory=pin_memory, worker_init_fn=AffinityInitializer(base_offset=1, cores_per_worker=1, name='train'))
         stop_dataloader = DataLoader(stop_data, batch_size=batch_size, shuffle=False, collate_fn=my_collate_fn, num_workers=4, persistent_workers=True,
                                     pin_memory=pin_memory, worker_init_fn=AffinityInitializer(base_offset=9, cores_per_worker=1, name='earlystop'))
         val_dataloader = DataLoader(val_data, batch_size=32, shuffle=False, collate_fn=my_collate_fn, num_workers=0)
@@ -256,10 +261,10 @@ def perform_training(specs):
 
         # ---------------------------- Perform training ----------------------------
 
-        for iter in range(specs['training']['restarts']):     # restart each fold multiple time for robustness            
+        for iter in range(specs['training']['restarts']):     # restart each fold multiple time for robustness
             logging.info(f'-------------- START ITERATION NR {iter} --------------')
             out_dir_iter = os.path.abspath(os.path.sep.join([out_dir_fold, f'iter_{iter}']))
-            os.makedirs(out_dir_iter)
+            os.makedirs(out_dir_iter, exist_ok=True)
             with open(os.path.join(out_dir_iter, f'specs.yml'), 'w') as f:   # copy specs file also to folder where model is saved
                 dump(specs, f, default_flow_style=False)
             
@@ -308,7 +313,7 @@ def perform_training(specs):
             with xr.open_zarr(val_data.file_dir) as ds:
                 x_coords = ds['x'].values.copy()
                 y_coords = ds['y'].values.copy()
-            model_predictor = predictor.ModelPredictor(out_dir_iter, var_dict, val_dataloader, filedir=pred_dir, load=f'best', device=device)
+            model_predictor = predictor.ModelPredictor(out_dir_iter, var_dict, val_dataloader, filedir=pred_dir, load=f'best_train', device=device)
             model_predictor.make_predictions_file(coords=(x_coords, y_coords), 
                                                 ref_coords=xy_coords_ref, extra_coords=lonlat_coords_ref)
 
@@ -396,7 +401,7 @@ def perform_training(specs):
 
 
 parser = argparse.ArgumentParser(description='Train meltNN model')
-parser.add_argument('-s', '--specifications', default='./spec_files_crossval/specs_melt_modularNNEBM_ERAI.yml',
+parser.add_argument('-s', '--specifications', default='./spec_files_crossval/specs_melt_modularNNEBM_ERAI_small_transform.yml',
                     help='name of yaml-file with model and training initialisation')
 args = parser.parse_args("")
 
