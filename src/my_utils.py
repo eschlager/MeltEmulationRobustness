@@ -9,7 +9,7 @@ import logging
 
 
 class AffinityInitializer:
-    def __init__(self, base_offset=0, cores_per_worker=1, name='train'):
+    def __init__(self, base_offset=0, cores_per_worker=1, name=''):
         self.base_offset = base_offset
         self.cores_per_worker = cores_per_worker
         self.name = name
@@ -17,7 +17,7 @@ class AffinityInitializer:
     def __call__(self, worker_id):
         affinity_worker_init_fn(worker_id, self.base_offset, self.cores_per_worker, self.name)
 
-def affinity_worker_init_fn(worker_id, base_offset=0, cores_per_worker=1, name='train'):
+def affinity_worker_init_fn(worker_id, base_offset=0, cores_per_worker=1, name=''):
     """
     Function to set CPU affinity for DataLoader workers.
     This is meant to be called by a wrapper function.
