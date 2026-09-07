@@ -2,7 +2,7 @@
 """
 Created on 24.07.2025   
 @author: eschlager
-Script for splitting dates into training, validation and test sets
+Script for splitting dates into training and validation sets
 with seasonal subsampling of the training and validation sets used during training.
 """
 #%% 
@@ -91,19 +91,17 @@ def plot_sampled_dates(all_dates, sampled_dates, fig_path):
 
 if __name__ == "__main__":
     
-    data_path = os.path.sep.join([project_dir, 'data', 'processed', 'HIRHAM5-ERAInterim', 'v_02'])
+    data_path = os.path.sep.join([project_dir, 'data', 'processed', 'HIRHAM5-ERAI', 'v_04'])
     os.makedirs(data_path, exist_ok=True)
     logging_config.define_root_logger(os.path.join(data_path, f'log_split.txt'))
     
     #%% Create partition in train/val/test sets with temporal subsampling
     logging.info(f'----------- Create partition in train/val/test sets --------------')    
-    # make year gap inbetween validation and test set, so that there is no information leakage
+
     train_start_date = pd.to_datetime('1990-01-01T12:00:00.000000000')
-    train_end_date = pd.to_datetime('2013-12-31T12:00:00.000000000')
-    val_start_date = pd.to_datetime('2014-01-01T12:00:00.000000000')
-    val_end_date = pd.to_datetime('2014-12-31T12:00:00.000000000')
-    test_start_date = pd.to_datetime('2016-01-01T12:00:00.000000000')
-    test_end_date = pd.to_datetime('2016-12-31T12:00:00.000000000')
+    train_end_date = pd.to_datetime('2015-12-31T12:00:00.000000000')
+    val_start_date = pd.to_datetime('2016-01-01T12:00:00.000000000')
+    val_end_date = pd.to_datetime('2016-12-31T12:00:00.000000000')
 
     ## temporal sub-sampling of training data
     doy = np.arange(1, 367)   # days 1 to 366
@@ -132,72 +130,19 @@ if __name__ == "__main__":
 
     train_dates = pd.date_range(start=train_start_date, end=train_end_date, freq='D')
     val_dates = pd.date_range(start=val_start_date, end=val_end_date, freq='D')
-    test_dates = pd.date_range(start=test_start_date, end=test_end_date, freq='D')
+
 
     logging.info(f'Number of all training dates: {len(train_dates)}')
     logging.info(f'Number of sub-sampled training dates: {len(sampled_train_dates)}')
     logging.info(f'Number of all validation dates: {len(val_dates)}')
     logging.info(f'Number of sub-sampled validation dates: {len(sampled_val_dates)}')
-    logging.info(f'Number of test dates: {len(test_dates)}')
+
 
 
     logging.info(f'Save dates to json')
     json.dump({'train_sub':sampled_train_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),
         'train':train_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),
         'val_sub':sampled_val_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),
-        'val':val_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),
-        'test':test_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),},
-        open(os.path.sep.join([data_path, f'train_val_test_split_{n_samples_per_year}.json']),'w'),)
+        'val':val_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),},
+        open(os.path.sep.join([data_path, f'train_val_split_{n_samples_per_year}.json']),'w'),)
     
-
-
-    #%% SMALL DEVELOPMENT DATA SET: Create partition in train/val/test sets with temporal subsampling
-    logging.info(f'----------- Create small train/val/test sets for code testing purposes --------------')    
-    train_start_date = pd.to_datetime('1990-01-01T12:00:00.000000000')
-    train_end_date = pd.to_datetime('1990-12-31T12:00:00.000000000')
-    val_start_date = pd.to_datetime('1991-01-01T12:00:00.000000000')
-    val_end_date = pd.to_datetime('1991-12-31T12:00:00.000000000')
-    test_start_date = pd.to_datetime('1992-01-01T12:00:00.000000000')
-    test_end_date = pd.to_datetime('1992-12-31T12:00:00.000000000')
-    
-    # temporal sub-sampling of training data
-    doy = np.arange(1, 367)   # days 1 to 366
-    mu = 205    # 24th of July ~ peak of melt season
-    sigma = 60
-    min_weight_doy = 0.0
-    logging.info(f'Subsample training dates using seasonal weighting following gaussian distribution with mu {mu} and sigma {sigma}') 
-    gauss_weights = np.exp(-0.5 * ((doy - mu) / sigma) ** 2)
-    weights = min_weight_doy + (1 - min_weight_doy) * gauss_weights
-    weights_doy = gauss_weights / gauss_weights.sum()
-
-    n_samples_per_year = 150
-    logging.info(f'Sample {n_samples_per_year} dates per year')
-
-    np.random.seed(42)
-    train_sampled_dates = sample_dates_by_year_chunks(weights_doy, train_start_date, train_end_date, n_samples_per_year, fig_path)
-    np.random.seed(42)
-    val_sampled_dates = sample_dates_by_year_chunks(weights_doy, val_start_date, val_end_date, n_samples_per_year, fig_path)
-
-    sampled_train_dates = pd.DatetimeIndex(np.sort(train_sampled_dates))
-    sampled_val_dates = pd.DatetimeIndex(np.sort(val_sampled_dates))
-
-    val_dates = pd.date_range(start=val_start_date, end=val_end_date, freq='D')
-    test_dates = pd.date_range(start=test_start_date, end=test_end_date, freq='D')
-
-    logging.info(f'Number of all training dates: {len(train_dates)}')
-    logging.info(f'Number of sub-sampled training dates: {len(sampled_train_dates)}')
-    logging.info(f'Number of all validation dates: {len(val_dates)}')
-    logging.info(f'Number of sub-sampled validation dates: {len(sampled_val_dates)}')
-    logging.info(f'Number of test dates: {len(test_dates)}')
-
-
-    logging.info(f'Save dates to json')
-    json.dump({'train_sub':sampled_train_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),
-        'train':train_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),
-        'val_sub':sampled_val_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),
-        'val':val_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),
-        'test':test_dates.strftime('%Y-%m-%dT%H:%M:%S.%f000').tolist(),},
-        open(os.path.sep.join([data_path, f'train_val_test_split_small.json']),'w'),)
-
-
-
