@@ -170,7 +170,7 @@ class FirnpackCellsDataset(Dataset):
         logging.info(f"  loaded mean and std for variables: {self.scaler_vals}")
         
 
-        logging.info("  mean and std per variable:")
+        # logging.info("  mean and std per variable:")
         for v in self.all_needed_vars:
             # if v in self.scaler_vals:
             #     logging.info(v)
@@ -304,11 +304,11 @@ class FirnpackCellsDataset(Dataset):
             batch_np = self.apply_scaler(batch_np)
 
             daily_input_data = self.to_tensor(batch_np, self.daily_inputs)
-            daily_input_data = torch.clamp(daily_input_data, min=-5, max=5)
+            #daily_input_data = torch.clamp(daily_input_data, min=-5, max=5)
             medrange_input_data = self.to_tensor(batch_np, self.medrange_inputs)
-            medrange_input_data = torch.clamp(medrange_input_data, min=-5, max=5)
+            #medrange_input_data = torch.clamp(medrange_input_data, min=-5, max=5)
             spinup_input_data = self.to_tensor(batch_np, self.spinup_inputs)
-            spinup_input_data = torch.clamp(spinup_input_data, min=-5, max=5)
+            #spinup_input_data = torch.clamp(spinup_input_data, min=-5, max=5)
             auto_data = self.to_tensor(batch_np, self.auto_inputs)
             target_data = self.to_tensor(batch_np, self.target_vars)
             trunoff_data = self.to_tensor(batch_np, self.trunoff_var)
