@@ -22,6 +22,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data._utils.collate import default_collate
 import pandas as pd
+import dask as da
 
 # import local modules
 from GRL_plotter import plot_greenland_only
@@ -67,45 +68,75 @@ class ModelEvaluator():
         else:
             self.target_full_label = f'{self.target_label} ({self.target_unit})'
 
-        self.true = self.ds[f'{self.target_name}_true'].values.astype(np.float64)
-        self.pred = self.ds[f'{self.target_name}_pred'].values.astype(np.float64)
+        # self.true = self.ds[f'{self.target_name}_true'].values.astype(np.float64)
+        # self.pred = self.ds[f'{self.target_name}_pred'].values.astype(np.float64)
+
+        self.true = self.ds[f'{self.target_name}_true'].astype(np.float64)
+        self.pred = self.ds[f'{self.target_name}_pred'].astype(np.float64)
 
     
     def get_rmse(self):
         return self.calc_rmse(self.true, self.pred)
 
+    # @staticmethod
+    # def calc_rmse(true, pred):
+    #     mask = ~np.isnan(true) & ~np.isnan(pred)
+    #     mse = torch.nn.MSELoss()(torch.from_numpy(true[mask]), torch.from_numpy(pred[mask]))
+    #     return torch.sqrt(mse).item()
     @staticmethod
     def calc_rmse(true, pred):
-        mask = ~np.isnan(true) & ~np.isnan(pred)
-        mse = torch.nn.MSELoss()(torch.from_numpy(true[mask]), torch.from_numpy(pred[mask]))
-        return torch.sqrt(mse).item()
+        diff = pred - true
+        mse = (diff**2).mean(skipna=True)
+        return np.sqrt(mse.compute().item())
 
     def get_mae(self):
         return self.calc_mae(self.true, self.pred)
 
+    # @staticmethod
+    # def calc_mae(true, pred):
+    #     mask = ~np.isnan(true) & ~np.isnan(pred)
+    #     mae = torch.nn.L1Loss()(torch.from_numpy(true[mask]), torch.from_numpy(pred[mask]))
+    #     return mae.item()
     @staticmethod
     def calc_mae(true, pred):
-        mask = ~np.isnan(true) & ~np.isnan(pred)
-        mae = torch.nn.L1Loss()(torch.from_numpy(true[mask]), torch.from_numpy(pred[mask]))
-        return mae.item()
+        mae = np.abs(pred - true).mean(skipna=True)
+        return mae.compute().item()
 
     def get_mbe(self):
         return self.calc_mbe(self.true, self.pred)
 
+    # @staticmethod
+    # def calc_mbe(true, pred):
+    #     mask = ~np.isnan(true) & ~np.isnan(pred)
+    #     mbe = torch.mean(torch.from_numpy(pred[mask])-torch.from_numpy(true[mask]))
+    #     return mbe.item()
     @staticmethod
     def calc_mbe(true, pred):
-        mask = ~np.isnan(true) & ~np.isnan(pred)
-        mbe = torch.mean(torch.from_numpy(pred[mask])-torch.from_numpy(true[mask]))
-        return mbe.item()
+        mbe = (pred - true).mean(skipna=True)
+        return mbe.compute().item()
     
     def get_r2(self):
         return self.calc_r2(self.true, self.pred)
 
+    # @staticmethod
+    # def calc_r2(true, pred):
+    #     from sklearn.metrics import r2_score
+    #     mask = ~np.isnan(true) & ~np.isnan(pred)
+    #     return r2_score(true[mask], pred[mask])
+
     @staticmethod
     def calc_r2(true, pred):
-        from sklearn.metrics import r2_score
-        mask = ~np.isnan(true) & ~np.isnan(pred)
-        return r2_score(true[mask], pred[mask])
+        mask = true.notnull() & pred.notnull()
+
+        true = true.where(mask)
+        pred = pred.where(mask)
+
+        ss_res = ((true - pred)**2).sum(skipna=True)
+        ss_tot = ((true - true.mean(skipna=True))**2).sum(skipna=True)
+
+        r2 = 1 - ss_res / ss_tot
+
+        return r2.compute().item()
 
     @staticmethod
     def smart_truncate(x):
@@ -185,43 +216,65 @@ class ModelEvaluator():
             loc_idx = None
 
         if (time_idx is not None) and (loc_idx is not None):
-            xx = self.ds[x].isel(time=time_idx).where(loc_mask).values
-            yy = self.ds[y].isel(time=time_idx).where(loc_mask).values
+            xx = self.ds[x].isel(time=time_idx).where(loc_mask)
+            yy = self.ds[y].isel(time=time_idx).where(loc_mask)
         elif time_idx is not None:
-            xx = self.ds[x].isel(time=time_idx).values
-            yy = self.ds[y].isel(time=time_idx).values
+            xx = self.ds[x].isel(time=time_idx)
+            yy = self.ds[y].isel(time=time_idx)
         elif loc_idx is not None:
-            xx = self.ds[x].where(loc_mask).values
-            yy = self.ds[y].where(loc_mask).values
+            xx = self.ds[x].where(loc_mask)
+            yy = self.ds[y].where(loc_mask)
         else:
-            xx = self.ds[x].values
-            yy = self.ds[y].values
+            xx = self.ds[x]
+            yy = self.ds[y]
 
-        xx = xx.flatten()
-        yy = yy.flatten()
-        valid_mask = ~np.isnan(xx) & ~np.isnan(yy)
-        xx = xx[valid_mask]
-        yy = yy[valid_mask]
-        
-        logging.info("  plotting ...")
-        gridsize = 50
-        hb = ax.hexbin(xx, yy, gridsize=gridsize, bins='log', cmap='RdYlBu_r', linewidths=(0,), mincnt=1, vmin=1)
-        offsets = hb.get_offsets()        # bin centers
-        counts = hb.get_array()           # bin values (counts)
+        valid_mask = xx.notnull() & yy.notnull()
 
-        
+        xx = xx.where(valid_mask)
+        yy = yy.where(valid_mask)
+
+
+        if x_lims is not None and y_lims is not None:
+            min_val = min(x_lims[0], y_lims[0])
+            max_val = max(x_lims[1], y_lims[1])
+        elif x_lims is not None:    
+            min_val = x_lims[0]
+            max_val = x_lims[1]
+        elif y_lims is not None:
+            min_val = y_lims[0]
+            max_val = y_lims[1]
+        else:
+            xx_min = xx.min(skipna=True)
+            xx_max = xx.max(skipna=True)
+            yy_min = yy.min(skipna=True)
+            yy_max = yy.max(skipna=True)
+
+            xx_min, xx_max, yy_min, yy_max = da.compute(
+                xx_min, xx_max,
+                yy_min, yy_max,
+            )
+
+            xx_min = xx_min.item()
+            xx_max = xx_max.item()
+            yy_min = yy_min.item()
+            yy_max = yy_max.item()
+            max_val = max(xx_max, yy_max)
+            min_val = min(xx_min, yy_min)
+        ax.set_xlim(xmin=min_val, xmax=max_val)
+        ax.set_ylim(ymin=min_val, ymax=max_val)
+
         # add text of true and predicted amount in Gt
         if self.target_unit == 'mm w.e. per day':
             scaling_factor = 1.796553703424 / 58391   # adjust for dataset
             if (x.endswith('true') and y.endswith('pred')):
-                xx_total = xx.sum()*scaling_factor / n_years
-                yy_total = yy.sum()*scaling_factor / n_years
+                xx_total = (xx.sum(skipna=True)*scaling_factor / n_years).compute().item()
+                yy_total = (yy.sum(skipna=True)*scaling_factor / n_years).compute().item()
                 if n_years >1:
                     ax.text(0.6, 0.9, f'Avg. total {LABEL_TRUE}: {xx_total:.0f}Gt', transform=ax.transAxes, ha='right')
                     ax.text(0.6, 0.85, f'Avg. total {LABEL_PRED}: {yy_total:.0f}Gt', transform=ax.transAxes, ha='right')
                 else:
-                    ax.text(0.5, 0.9, f'{LABEL_TRUE}: {xx_total:.0f}Gt', transform=ax.transAxes, ha='right')
-                    ax.text(0.5, 0.85, f'{LABEL_PRED}: {yy_total:.0f}Gt', transform=ax.transAxes, ha='right')
+                    ax.text(0.6, 0.9, f'{LABEL_TRUE}: {xx_total:.0f}Gt', transform=ax.transAxes, ha='right')
+                    ax.text(0.6, 0.85, f'{LABEL_PRED}: {yy_total:.0f}Gt', transform=ax.transAxes, ha='right')
                 plt.xlabel(f'{LABEL_TRUE} {self.target_full_label}')
                 plt.ylabel(f'{LABEL_PRED} {self.target_full_label}')
         # add rmse and mae as text in figures
@@ -230,44 +283,81 @@ class ModelEvaluator():
         ax.text(.9, 0.15, f'RMSE: {rmse:.2f}', transform=ax.transAxes, ha='right')
         ax.text(.9, 0.10, f'MAE: {mae:.2f}', transform=ax.transAxes, ha='right')
 
-        # Mask high-count bins from colormap and colorbar
-        masked_counts = np.ma.array(counts, mask=counts > color_threshold)
-        hb.set_array(masked_counts)
-        vmin = np.nanmin(masked_counts)
-        vmax = np.nanmax(masked_counts)
+        
+        logging.info("  plotting ...")
+        ref_range = 200      # reference x-axis range
+        ref_gridsize = 50    # looks good for the reference range
+        current_range = max_val - min_val
+        gridsize = int(ref_gridsize * current_range / ref_range)  # re-calculate gridsize for actual axis range
 
-        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
-            vmin, vmax = None, None
-        hb.set_clim(vmin=vmin, vmax=vmax)
+        xx, yy = da.compute(xx, yy)
 
-        # compute flat-to-flat width in data coords
-        from matplotlib.patches import RegularPolygon
-        from matplotlib.collections import PatchCollection
-        x0, x1 = ax.get_xlim()
-        flat_width = (x1 - x0) / gridsize
+        xx = xx.values.ravel()
+        yy = yy.values.ravel()
 
-        # hexagon circumradius R (distance center -> vertex) given flat-to-flat width w:
-        # flat-to-flat = R * sqrt(3)  =>  R = w / sqrt(3)
-        R = flat_width / np.sqrt(3)
+        valid_mask = np.isfinite(xx) & np.isfinite(yy)
 
-        patches = []
-        high_bins = offsets[counts > color_threshold]
-        for x_center, y_center in high_bins:
-            hex_patch = RegularPolygon((x_center, y_center),
-                                    numVertices=6,
-                                    radius=R,
-                                    orientation=0.,
-                                    edgecolor='none', facecolor='black')
-            patches.append(hex_patch)
+        xx = xx[valid_mask]
+        yy = yy[valid_mask]
+        hb = ax.hexbin(xx, yy, gridsize=gridsize, extent=(min_val, max_val, min_val, max_val), bins='log', cmap='RdYlBu_r', linewidths=(0,), mincnt=1, vmin=1, vmax=color_threshold)
+        offsets = hb.get_offsets()        # bin centers
+        counts = hb.get_array()           # bin values (counts)
 
-        pc = PatchCollection(patches, match_original=True)  # match_original keeps edge/face colors
-        ax.add_collection(pc)
+        
+
+
+        # # Mask high-count bins from colormap and colorbar
+        # masked_counts = np.ma.array(counts, mask=counts > color_threshold)
+        # hb.set_array(masked_counts)
+        # vmin = np.nanmin(masked_counts)
+        # vmax = np.nanmax(masked_counts)
+
+        # if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+        #     vmin, vmax = None, None
+        # hb.set_clim(vmin=vmin, vmax=vmax)
+
+        # # compute flat-to-flat width in data coords
+        # from matplotlib.patches import RegularPolygon
+        # from matplotlib.collections import PatchCollection
+        # x0, x1 = ax.get_xlim()
+        # flat_width = (x1 - x0) / gridsize
+
+        # # hexagon circumradius R (distance center -> vertex) given flat-to-flat width w:
+        # # flat-to-flat = R * sqrt(3)  =>  R = w / sqrt(3)
+        # R = flat_width / np.sqrt(3)
+
+        # patches = []
+        # high_bins = offsets[counts > color_threshold]
+        # for x_center, y_center in high_bins:
+        #     hex_patch = RegularPolygon((x_center, y_center),
+        #                             numVertices=6,
+        #                             radius=R,
+        #                             orientation=0.,
+        #                             edgecolor='none', facecolor='black')
+        #     patches.append(hex_patch)
+
+        # pc = PatchCollection(patches, match_original=True)  # match_original keeps edge/face colors
+        # ax.add_collection(pc)
 
         from mpl_toolkits.axes_grid1 import make_axes_locatable
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="4%", pad=0.2)  # size is 4% of axes height
-        cbar = fig.colorbar(hb, cax=cax)
-        cbar.set_label(f"bin count (≤ {int(color_threshold)})")
+        # cbar = fig.colorbar(hb, cax=cax)
+
+        cmap = plt.get_cmap("RdYlBu_r").copy()
+        cmap.set_over("black")
+
+        hb.set_cmap(cmap)
+        hb.set_clim(vmin=1, vmax=color_threshold)
+
+        has_overflow = np.any(counts > color_threshold)
+
+        cbar = fig.colorbar(
+            hb,
+            cax=cax,
+            extend="max" if has_overflow else "neither"
+        )
+        cbar.set_label(f"Log10(N)")
         
         # plot reference line
         if ref_line == 'equal':
@@ -393,8 +483,8 @@ class ModelEvaluator():
             xx = data['true'].sel(time=date, method='nearest')
             yy = data['pred'].sel(time=date, method='nearest')
             nr_days = 1
-            xx_daily_values = xx.values.flatten()
-            yy_daily_values = yy.values.flatten()
+            xx_daily_values = xx
+            yy_daily_values = yy
             logging.info(f'Get data from datetime {xx.time.values}')
             title = f"{self.target_label} {date_str}"
             cbar_label = self.target_unit
@@ -424,8 +514,8 @@ class ModelEvaluator():
             xx = data['true'].isel(time=time_idx)
             yy = data['pred'].isel(time=time_idx)
             nr_days = len(time_idx)
-            xx_daily_values = xx.values.flatten()
-            yy_daily_values = yy.values.flatten()
+            xx_daily_values = xx
+            yy_daily_values = yy
             xx = xx.reduce(getattr(np, self.reduce_time), dim="time")
             yy = yy.reduce(getattr(np, self.reduce_time), dim="time")
         elif month is not None:   # specific month (aggregated over all years in dataset)
@@ -451,8 +541,8 @@ class ModelEvaluator():
             xx = data['true'].isel(time=time_idx)
             yy = data['pred'].isel(time=time_idx)
             nr_days = len(time_idx)
-            xx_daily_values = xx.values.flatten()
-            yy_daily_values = yy.values.flatten()
+            xx_daily_values = xx
+            yy_daily_values = yy
             xx = xx.reduce(getattr(np, self.reduce_time), dim="time")
             yy = yy.reduce(getattr(np, self.reduce_time), dim="time")
             if self.reduce_time == 'sum':  # calculated monthly sums, so now we divide by nr years to get average monthly total
@@ -466,15 +556,22 @@ class ModelEvaluator():
             xx = data['true'].sum(dim='time', skipna=False)
             yy = data['pred'].sum(dim='time', skipna=False)
             nr_days = len(data['time'])
-            xx_daily_values = data['true'].values.flatten()
-            yy_daily_values = data['pred'].values.flatten()
+            xx_daily_values = data['true']
+            yy_daily_values = data['pred']
             years = np.unique(pd.to_datetime(self.ds["time"].values).year)
-            if len(years)==1:
+            n_years = len(years)
+            if n_years==1:
                 cbar_label = self.target_unit.replace('day', 'year')
                 title = f'{self.target_label} {years[0]} ({self.reduce_time})'
-            elif len(years) >1:
+            elif n_years >1:
+                if self.reduce_time == 'sum':
+                    xx = xx / n_years
+                    yy = yy / n_years
+                    title = f'{self.target_label} ({self.reduce_time}); avg. across {str(np.min(years))}-{str(np.max(years))}'
+                else:
+                    title = f'{self.target_label} {years.min()}-{years.max()} ({self.reduce_time})'
                 cbar_label = f'mm w.e.'
-                title = f'{self.target_label} {years.min()}-{years.max()} ({self.reduce_time})'
+                
 
         # select colormap
         if self.target_name == 'albedom':
@@ -484,10 +581,15 @@ class ModelEvaluator():
         cmap.set_bad((0, 0, 0, 0.0)) 
 
         # get value limits
-        min_x = np.nanmin(xx.values.flatten())
-        max_x =  np.nanmax(xx.values.flatten())
-        min_y = np.nanmin(yy.values.flatten())
-        max_y =  np.nanmax(yy.values.flatten())
+        # min_x = np.nanmin(xx.values.flatten())
+        # max_x = np.nanmax(xx.values.flatten())
+        # min_y = np.nanmin(yy.values.flatten())
+        # max_y = np.nanmax(yy.values.flatten())
+        min_x = xx.min(skipna=True).compute().item()
+        max_x = xx.max(skipna=True).compute().item()
+
+        min_y = yy.min(skipna=True).compute().item()
+        max_y = yy.max(skipna=True).compute().item()
 
         if join_colorbar:
             # value limits
@@ -520,8 +622,9 @@ class ModelEvaluator():
 
         # plot residuals
         residual = yy - xx
-        mindiff = np.nanmin(residual.values.flatten())
-        maxdiff = np.nanmax(residual.values.flatten())
+
+        mindiff = residual.min(skipna=True).compute().item()
+        maxdiff = residual.max(skipna=True).compute().item()
         absdiff = max(abs(mindiff), abs(maxdiff), 0.1)
         if residual_max is not None:
             extend_colorbarmin = True if residual_max < abs(mindiff) else False
@@ -628,24 +731,29 @@ class ModelEvaluator():
         if self.target_name == 'snmel':
             threshold = 1.
             area_scaling_factor = 1796553.703424 / 58391 / nr_days   # transform number of pixels into km²
-            logging.info(f'Calculate mean melt extent for {nr_days} days...')
-            xx_pos = xx_daily_values[xx_daily_values>threshold]
-            xx_melt_extent = len(xx_pos)
+            logging.info(f'Calculate average melt extent for {nr_days} days...')
+            melt_mask = xx_daily_values > threshold
+            xx_pos = xx_daily_values.where(melt_mask)
+            xx_melt_extent = melt_mask.sum().compute().item()
             axs[0].text(1., 0.0, rf'ME: {int(xx_melt_extent*area_scaling_factor)}km$\mathrm{{^2}}$', transform=axs[0].transAxes, ha='right')
             if xx_melt_extent > 100:
-                xx_median = np.median(xx_pos)
+                xx_pos_np = xx_pos.data.compute()
+                xx_pos_np = xx_pos_np[~np.isnan(xx_pos_np)]
+                xx_median = np.median(xx_pos_np)
+                xx_iqr = np.percentile(xx_pos_np, 75) - np.percentile(xx_pos_np, 25)
                 axs[0].text(1., 0.12, f'med: {xx_median:.2f}', transform=axs[0].transAxes, ha='right')
-                from scipy.stats import iqr
-                xx_iqr = iqr(xx_pos)
                 axs[0].text(1., 0.06, f'IQR: {xx_iqr:.2f}', transform=axs[0].transAxes, ha='right')
 
-            yy_pos = yy_daily_values[yy_daily_values>threshold]
-            yy_melt_extent = len(yy_pos)
+            melt_mask = yy_daily_values > threshold
+            yy_pos = yy_daily_values.where(melt_mask)
+            yy_melt_extent = melt_mask.sum().compute().item()
             axs[1].text(1., 0.0, rf'ME: {int(yy_melt_extent*area_scaling_factor)}km$\mathrm{{^2}}$', transform=axs[1].transAxes, ha='right')
             if xx_melt_extent > 100:
-                yy_median = np.median(yy_pos)
+                yy_pos_np = yy_pos.data.compute()
+                yy_pos_np = yy_pos_np[~np.isnan(yy_pos_np)]
+                yy_median = np.median(yy_pos_np)
+                yy_iqr = np.percentile(yy_pos_np, 75) - np.percentile(yy_pos_np, 25)
                 axs[1].text(1., 0.12, f'med: {yy_median:.2f}', transform=axs[1].transAxes, ha='right')
-                yy_iqr = iqr(yy_pos)
                 axs[1].text(1., 0.06, f'IQR: {yy_iqr:.2f}', transform=axs[1].transAxes, ha='right')
 
         rmse = self.calc_rmse(xx_daily_values, yy_daily_values)
