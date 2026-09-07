@@ -2,7 +2,7 @@
 """
 @author: eschlager
 Create classification of GrIS in different zones:
-1. ablation (total SMB of 1990-2013 < 0)
+1. ablation (total SMB of 1990-1999 < 0)
 2. percolation (accumulation zone with non-negliglible melt, i.e. at least in one year there was melt >= 100 mm weq)
 3. dry snow (accumulation zone with yearly melt < 100 mm weq)
 
@@ -19,8 +19,8 @@ from matplotlib.colors import ListedColormap
 import xarray as xr
 
 base_dir = os.path.dirname(os.path.abspath('')).split(os.sep + 'preprocessing')[0]
-data_dir = os.path.sep.join(['/dmidata', 'users', 'elkesc', 'data', 'interim', 'CESM2_SSP5-85', 'HIRHAM5', 'firnpack']) 
-aux_dir = os.path.sep.join(['/dmidata', 'users', 'elkesc', 'data', 'interim', 'CESM2_SSP5-85', 'HIRHAM5', 'AuxFiles'])
+data_dir = os.path.sep.join([base_dir, 'data', 'interim', 'CESM2', 'HIRHAM5', 'firnpack']) 
+aux_dir = os.path.sep.join([base_dir, 'data', 'interim', 'CESM2', 'HIRHAM5', 'AuxFiles'])
 
 #%% Create zones file based on SMB from 1990-1999
 
@@ -166,5 +166,3 @@ plt.show()
 ds_sub = xr.Dataset(coords={'y':ds_zones.y.values, 'x':ds_zones.x.values})
 ds_sub['subsampling'] = (('y','x'), mask_2d)
 ds_sub.to_netcdf(os.path.sep.join([aux_dir, f'GRL_subsampleidx_{N}.nc']))
-
-# %%
