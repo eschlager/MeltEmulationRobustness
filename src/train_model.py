@@ -14,13 +14,14 @@ import csv
 import pandas as pd
 import time
 import gc
+import random
 
 from my_utils import shutdown_dataloader
 
 
 class ModelTrainer():
 
-    def __init__(self, model, dataloader_train, dataloader_val, train_specs, out_dir_abs, auto_mode=False, device='cpu'):
+    def __init__(self, model, dataloader_train, dataloader_val, train_specs, out_dir_abs, auto_mode=False, device='cpu', scaler=None):
         """
         Args:
             model (nn.Module): the model to be trained
@@ -30,6 +31,7 @@ class ModelTrainer():
             out_dir_abs (str): absolute path to the output directory where the model and loss history
             auto_mode (bool): if True, use previous predictions for auto-regressive learning, otherwise use teacher-forced learning
             device (str): device to use for training, cpu or cuda
+            scaler: dict of scalings for variables; needed for physical loss
         """
         self.model = model
         self.dataloader_train = dataloader_train
@@ -38,6 +40,7 @@ class ModelTrainer():
         self.out_dir = out_dir_abs
         self.auto_mode = auto_mode
         self.device = device
+        self.scaler = scaler
         
 
         self.targets = model.get_targets()
@@ -56,8 +59,7 @@ class ModelTrainer():
 
         params_to_optimize = list(self.model.parameters())
 
-        self.train_loss_components = {key: [] for key in self.targets}
-        self.val_loss_components = {key: [] for key in self.targets}
+
         self.train_loss = []
         self.val_loss = []
         if self.auto_mode:
@@ -69,12 +71,45 @@ class ModelTrainer():
         # define which loss function to use for each target variable
         self.loss_fct_tags = {k: self.train_specs['loss_reg'] for k in self.targets}
         
+        if len(self.targets) > 1:
+            self.train_loss_components = {key: [] for key in self.targets}
+            self.val_loss_components = {key: [] for key in self.targets}
+
         torch_losses = {
             'mse': torch.nn.MSELoss(),
             'l1': torch.nn.L1Loss(),
             'smoothl1': torch.nn.SmoothL1Loss(),
             'huber': torch.nn.HuberLoss(),
+            'mono': torch.nn.MSELoss()
         }
+
+        self.loss_terms = ['mse']
+        if 'physical' in self.loss_fct_tags[self.targets[0]]:
+            # get variables indices and scalings
+            self.daily_inputs_vars = self.dataloader_train.dataset.daily_inputs
+            self.energyin_idx = self.daily_inputs_vars.index('energyin')
+            self.dswrad_idx = self.daily_inputs_vars.index('dswrad')
+            self.scaler_energyin = self.scaler['energyin']
+            self.scaler_dswrad = self.scaler['dswrad']
+            self.scaler_snmel = self.scaler['snmel']
+            self.perturb = 10     # amount of W/m² to perturb the energy inputs
+            self.energyin_perturb = self.perturb / self.scaler_energyin[1]
+            self.dswrad_perturb = self.perturb / self.scaler_dswrad[1]
+            self.loss_terms = self.loss_terms+['energyin', 'dswrad']
+            self.train_loss_components = {key: [] for key in self.loss_terms}
+            self.val_loss_components = {key: [] for key in self.loss_terms}
+            torch_losses['physical'] = Physical_loss(self.scaler, weighting=20)
+        if 'mono' in self.loss_fct_tags[self.targets[0]]:
+            # get variables indices
+            self.daily_inputs_vars = self.dataloader_train.dataset.daily_inputs
+            energy_vars = ['energyin', *[f'energyin_d-{i}' for i in range(1, 10)]]
+            self.energy_lag_idx = [self.daily_inputs_vars.index(v) for v in energy_vars]
+            dswrad_vars = ['dswrad', *[f'dswrad_d-{i}' for i in range(1, 10)]]
+            self.dswrad_lag_idx = [self.daily_inputs_vars.index(v) for v in dswrad_vars]
+            self.loss_terms = self.loss_terms+['mono_energyin', 'mono_dswrad']
+            self.train_loss_components = {key: [] for key in self.loss_terms} 
+            self.val_loss_components = {key: [] for key in self.loss_terms[:-2]}   # no monotonic terms for validation because I do not want to track the gradients!
+            self.mono_weight = 100
         
         
         self.loss_fct = {k: torch_losses[v] for k,v in self.loss_fct_tags.items()}
@@ -118,10 +153,33 @@ class ModelTrainer():
                 logging.info(f'Continue training from {PATH}')
                 checkpoint = torch.load(PATH, weights_only=False)
                 self.model.load_state_dict(checkpoint['model_state_dict'])
+                
+                ## for finetuning only first layers:
+                # for p in self.model.parameters():
+                #     p.requires_grad = False
+
+                # # unfreeze first layers
+                # for p in self.model.NNdaily.linears[0].parameters():
+                #     p.requires_grad = True
+                # for p in self.model.NNspinup.linears[0].parameters():
+                #     p.requires_grad = True
+                
+                # # or: unfreeze last layer
+                # for p in self.model.reg_heads.snmel[-1].parameters():
+                #     p.requires_grad = True
+                    
+                # # recreate optimizer with only trainable params
+                # self.optimizer = torch.optim.Adam(
+                #     [p for p in self.model.parameters() if p.requires_grad],
+                #     lr=self.train_specs['lr']
+                # )
+                
+                # to continue training all network weights:
                 self.optimizer.load_state_dict(
                     checkpoint['optimizer_state_dict'])
                 for g in self.optimizer.param_groups:
                     g['lr'] = self.train_specs['lr']
+                
                 loss_history = pd.read_csv(os.path.sep.join(
                     [self.out_dir, 'loss.csv']), delimiter=';')
                 
@@ -134,10 +192,11 @@ class ModelTrainer():
                         self.val_loss_teacher = loss_history['val_loss'].tolist()
                         loss_history['val_loss_teacher'] = loss_history['val_loss']
                         loss_history.to_csv(os.path.sep.join([self.out_dir, 'loss.csv']), sep=';', index=False)
-            
-                
-                self.best_val = np.min(self.val_loss)
-                self.best_train = np.min(self.train_loss)
+
+                # # if want to keep the historical best losses 
+                # # (only adviseable for continuing same training, not when doing e.g. transfer learning on a different data set)
+                # self.best_val = np.min(self.val_loss)    
+                # self.best_train = np.min(self.train_loss)
                 self.start_epoch = checkpoint['epoch'] + 1
 
 
@@ -214,6 +273,8 @@ class ModelTrainer():
             if self.start_epoch == 1:
                 if len(self.targets)>1:
                     column_headers = ['epoch', 'lr', 'train_loss', 'val_loss'] + [f"train_{v}_{k}" for k, v in self.loss_fct_tags.items()] + [f"val_{v}_{k}" for k, v in self.loss_fct_tags.items()]
+                elif self.loss_fct_tags[self.targets[0]] == 'physical':
+                    column_headers = ['epoch', 'lr', 'train_loss', 'val_loss'] + [f"train_{t}" for t in self.train_loss_components.keys()] + [f"val_{t}" for t in self.val_loss_components.keys()]
                 else:
                     column_headers = ['epoch', 'lr', 'train_loss', 'val_loss']
                 if self.auto_mode:
@@ -231,12 +292,13 @@ class ModelTrainer():
             for epoch in range(self.start_epoch, self.max_epochs+self.start_epoch):       
                 train_loss_epoch = 0.
                 train_loss_epoch_vars = {k: 0. for k in self.targets}
+                train_loss_epoch_physical = {k: 0. for k in self.loss_terms}
                 total_samples = 0
                 self.model.train()
 
+                train_iter = iter(self.dataloader_train)
                 # To use adapting roll-out window during training
                 if epoch > 1: # increase rate of autoregressive samples every 30 epochs
-                    train_iter = iter(self.dataloader_train)
                     _, _, _, y, _, _, _, _ = next(train_iter)
                     sequ_len = y.size(0)
                     if sequ_len >1 and self.auto_mode:
@@ -278,18 +340,49 @@ class ModelTrainer():
                     x_spinup = x_spinup[-1,:,:]
                     trunoff_map = trunoff_map[-1,:,:]
                     doy = doy[-1,:]
+                    
+                    if self.loss_fct_tags[self.targets[0]] == 'mono':   # is using monotonic loss term, need gradients
+                        x_daily.requires_grad_(True)
+                    
                     output = self.model(x_daily, x_medrange, x_spinup, y_prev, trunoff_map, doy)
 
-                    ## run diagnosis after first epoch
-                    # self.model.diagnose_training(x_daily, x_medrange, x_spinup, y_prev, trunoff_map, doy, y[-1,:,:], epoch)
-
                     # calculate loss
-                    if len(self.targets)==1: 
-                        loss_batch = self.loss(output, y[-1,:,:])
+                    if self.loss_fct_tags[self.targets[0]] == 'physical':
+                        # perturbation of energyin
+                        x_daily_energyin = x_daily.clone()
+                        x_daily_energyin[:, self.energyin_idx] += self.energyin_perturb
+                        output_energyin = self.model(x_daily_energyin, x_medrange, x_spinup, y_prev, trunoff_map, doy)
+                        
+                        # perturbation of dswrad
+                        x_daily_dswrad = x_daily.clone()
+                        x_daily_dswrad[:, self.dswrad_idx] += self.dswrad_perturb
+                        output_dswrad = self.model(x_daily_dswrad, x_medrange, x_spinup, y_prev, trunoff_map, doy)
+
+                        mse_batch, energyin_loss_batch, dswrad_loss_batch, _, _, _ = self.loss(output, output_energyin, output_dswrad, y[-1,:,:])
+                        loss_batch = mse_batch + energyin_loss_batch + dswrad_loss_batch
+                        train_loss_epoch_physical['mse'] += mse_batch.detach().item() * batch_size
+                        train_loss_epoch_physical['energyin'] += energyin_loss_batch.detach().item() * batch_size
+                        train_loss_epoch_physical['dswrad'] += dswrad_loss_batch.detach().item() * batch_size
+                    elif self.loss_fct_tags[self.targets[0]] == 'mono':
+                        mse_batch = self.loss(output, y[-1,:,:])
+                        # gradients w.r.t. energyin previous days
+                        grads = torch.autograd.grad(outputs=output.sum(), inputs=x_daily, create_graph=True)[0]
+                        energy_grads = grads[:, self.energy_lag_idx]
+                        dswrad_grads = grads[:, self.dswrad_lag_idx]
+                        mono_energyin_loss_batch = torch.relu(-energy_grads).pow(2).mean()
+                        mono_dswrad_loss_batch = torch.relu(-dswrad_grads).pow(2).mean()
+                        mono_loss_batch = self.mono_weight * (mono_energyin_loss_batch + mono_dswrad_loss_batch)
+                        loss_batch = mse_batch + mono_loss_batch
+                        train_loss_epoch_physical['mse'] += mse_batch.detach().item() * batch_size
+                        train_loss_epoch_physical['mono_energyin'] += mono_energyin_loss_batch.detach().item() * batch_size
+                        train_loss_epoch_physical['mono_dswrad'] += mono_dswrad_loss_batch.detach().item() * batch_size
                     else:
-                        loss_batch, loss_per_var = self.loss(output, y[-1,:,:])
-                        for i,t in enumerate(self.targets):
-                            train_loss_epoch_vars[t] += loss_per_var[i].detach().item() * batch_size
+                        if len(self.targets)==1: 
+                            loss_batch = self.loss(output, y[-1,:,:])
+                        else:
+                            loss_batch, loss_per_var = self.loss(output, y[-1,:,:])
+                            for i,t in enumerate(self.targets):
+                                train_loss_epoch_vars[t] += loss_per_var[i].detach().item() * batch_size
                     loss_batch.backward()
 
                     # apply gradient clipping
@@ -304,6 +397,12 @@ class ModelTrainer():
                 
                 self.train_loss.append(total_train_loss)
                 logging.info(f'E# {epoch} - Training loss: {total_train_loss:.6f}')
+                if ('mono' in self.loss_fct_tags[self.targets[0]]) or ('physical' in self.loss_fct_tags[self.targets[0]]):
+                    for t in train_loss_epoch_physical.keys():
+                        train_loss_epoch_physical[t] = train_loss_epoch_physical[t] / total_samples
+                        self.train_loss_components[t].append(train_loss_epoch_physical[t])
+                        logging.info(f'            loss term for {t}: {train_loss_epoch_physical[t]:.6f}')
+
                 if len(self.targets)>1:
                     for t in self.targets:
                         train_loss_epoch_vars[t] = train_loss_epoch_vars[t] / total_samples
@@ -311,12 +410,15 @@ class ModelTrainer():
                         logging.info(f'             with {self.loss_fct_tags[t]} for {t}: {train_loss_epoch_vars[t]:.6f}')
 
 
-
                 # perform validation of epoch
                 val_loss_epoch = 0.
                 val_loss_epoch_teacher = 0.
                 val_loss_epoch_vars = {k: 0. for k in self.targets}
+                val_loss_epoch_physical = {k: 0. for k in self.loss_terms}
                 total_samples = 0
+                energy_response_epoch = 0.0
+                dswrad_response_epoch = 0.0
+                n_melt_epoch = 0
                 self.model.eval()
                 with torch.inference_mode():
                     val_iter = iter(self.dataloader_val)
@@ -349,15 +451,37 @@ class ModelTrainer():
                         x_spinup = x_spinup[-1,:,:]
                         trunoff_map = trunoff_map[-1,:,:]
                         doy = doy[-1,:]
+                        
                         output = self.model(x_daily, x_medrange, x_spinup, y_prev, trunoff_map, doy)
 
-                        if len(self.targets)==1: 
-                            loss_batch = self.loss(output, y[-1,:,:])
+                        if self.loss_fct_tags[self.targets[0]] == 'physical':
+                            x_daily_energyin = x_daily.clone()
+                            x_daily_energyin[:, self.energyin_idx] += self.energyin_perturb
+                            output_energyin = self.model(x_daily_energyin, x_medrange, x_spinup, y_prev, trunoff_map, doy)
+                            
+                            x_daily_dswrad = x_daily.clone()
+                            x_daily_dswrad[:, self.dswrad_idx] += self.dswrad_perturb
+                            output_dswrad = self.model(x_daily_dswrad, x_medrange, x_spinup, y_prev, trunoff_map, doy)
+    
+                                            
+                            mse_batch, energyin_loss_batch, dswrad_loss_batch, mean_energy_response, mean_dswrad_response, n_melt = self.loss(output, output_energyin, output_dswrad, y[-1,:,:])
+                            loss_batch = mse_batch + energyin_loss_batch + dswrad_loss_batch
+                            val_loss_epoch_physical['mse'] += mse_batch.detach().item() * batch_size
+                            val_loss_epoch_physical['energyin'] += energyin_loss_batch.detach().item() * batch_size
+                            val_loss_epoch_physical['dswrad'] += dswrad_loss_batch.detach().item() * batch_size
+
+                            energy_response_epoch += mean_energy_response.item()
+                            dswrad_response_epoch += mean_dswrad_response.item()
+                            n_melt_epoch += n_melt.item()
+                            
                         else:
-                            loss_batch, loss_per_var = self.loss(output, y[-1,:,:])
-                            for i,t in enumerate(self.targets):
-                                val_loss_epoch_vars[t] += loss_per_var[i].item() * batch_size
-                        
+                            if len(self.targets)==1: 
+                                loss_batch = self.loss(output, y[-1,:,:])
+                            else:
+                                loss_batch, loss_per_var = self.loss(output, y[-1,:,:])
+                                for i,t in enumerate(self.targets):
+                                    val_loss_epoch_vars[t] += loss_per_var[i].item() * batch_size
+                            
                         val_loss_epoch += loss_batch.item() * batch_size
 
 
@@ -370,6 +494,17 @@ class ModelTrainer():
                     self.val_loss_teacher.append(total_val_loss_teacher)
                 else:
                     logging.info(f'       Validation loss: {total_val_loss:.6f}')
+                    
+                if self.loss_fct_tags[self.targets[0]] == 'physical':
+                    mean_energy_response = energy_response_epoch / n_melt_epoch
+                    mean_dswrad_response = dswrad_response_epoch / n_melt_epoch
+                    logging.info(f'    Energy response to energyin perturbation: {mean_energy_response:.2f}')
+                    logging.info(f'    Energy response to dswrad perturbation: {mean_dswrad_response:.2f}')
+                    
+                    for t in val_loss_epoch_physical.keys():
+                        val_loss_epoch_physical[t] = val_loss_epoch_physical[t] / total_samples
+                        self.val_loss_components[t].append(val_loss_epoch_physical[t])
+                        logging.info(f'            loss term for {t}: {val_loss_epoch_physical[t]:.6f}')
                 
                 self.val_loss.append(total_val_loss)
                 if len(self.targets)>1:
@@ -397,6 +532,9 @@ class ModelTrainer():
                 if epoch % 10 == 0:
                     logging.info(f'Save latest model at epoch {epoch} with validation loss: {total_val_loss:.6f}')
                     self.checkpoint(epoch, os.path.sep.join([self.out_dir, 'latest_model.pth']))
+                    # # alternatively save every 10th model without overwriting:
+                    # logging.info(f'Save model at epoch {epoch} with validation loss: {total_val_loss:.6f}')
+                    # self.checkpoint(epoch, os.path.sep.join([self.out_dir, f'epoch_{epoch}_model.pth']))
                 
                 # save best model (w.r.t. training loss)
                 if total_train_loss < self.best_train:
@@ -423,7 +561,6 @@ class ModelTrainer():
                         lr_old = lr_now
 
 
-                
    
         # finally: save latest model       
         logging.info(f'Save latest model at epoch {epoch} with validation loss: {total_val_loss:.6f}')
@@ -560,3 +697,63 @@ class Multitarget_loss(nn.Module):
                 loss_weighted += self.weights[t] * loss_per_var[-1]
 
         return loss_weighted, loss_per_var
+    
+    
+class Physical_loss(nn.Module):
+    """Add physical loss term for snmel target"""
+    def __init__(self, scaler, weighting=1):
+        super().__init__()
+        self.weighting = weighting
+        
+        self.scaler_snmel = scaler['snmel']
+        self.delta_M_energyin = 2.6 / self.scaler_snmel[1]    # theoretical melt sensitivity w.r.t. E ~2.6
+        self.tolerance = 0.2 / self.scaler_snmel[1]           # tolerance
+        
+        self.delta_M_dswrad_min = 0.39 / self.scaler_snmel[1] - self.tolerance  # melt sensitivity w.r.t. dswrad for high albedo ~0.39mm
+        self.delta_M_dswrad_max = 1.56 / self.scaler_snmel[1] + self.tolerance  # melt sensitivity w.r.t. dswrad for bare ice albedo ~1.56mm
+        
+
+    def forward(self, outputs, outputs_energyin, outputs_dswrad, targets):
+        # normal mse loss
+        mse = torch.nn.MSELoss()(outputs, targets)
+        
+        # physical loss (only where daily melt > melt_threshold)
+        melt_threshold = 10
+        targets_unscaled = targets * self.scaler_snmel[1] + self.scaler_snmel[0]
+        mask = targets_unscaled > melt_threshold
+
+        # penalty term w.r.t. E
+        diff_energyin = outputs_energyin - outputs
+        
+        energyin_loss = (
+            mask *
+            torch.relu(
+                torch.abs(diff_energyin - self.delta_M_energyin) - self.tolerance
+            ).pow(2)
+        ).sum() / (mask.sum() + 1e-8)
+
+        energyin_loss = energyin_loss*self.weighting
+
+        # penalty term w.r.t. dswrad
+        diff_dswrad = outputs_dswrad - outputs
+        below = self.delta_M_dswrad_min - diff_dswrad
+        above = diff_dswrad - self.delta_M_dswrad_max
+
+        dswrad_loss = (
+            mask * (
+                torch.relu(below).pow(2)
+                + torch.relu(above).pow(2)
+            )
+        ).sum() / (mask.sum() + 1e-8)
+        dswrad_loss = dswrad_loss*self.weighting
+
+        # for addtional monitoring
+        n_melt = mask.sum().detach()
+        if n_melt>0:
+            mean_energy_response = diff_energyin[mask].sum().detach() * self.scaler_snmel[1]
+            mean_dswrad_response = diff_dswrad[mask].sum().detach() * self.scaler_snmel[1]
+        else:
+            mean_energy_response = torch.tensor(0.0, device=outputs.device)
+            mean_dswrad_response = torch.tensor(0.0, device=outputs.device)
+
+        return mse, energyin_loss, dswrad_loss, mean_energy_response, mean_dswrad_response, n_melt
