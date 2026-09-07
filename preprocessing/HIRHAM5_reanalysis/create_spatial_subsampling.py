@@ -24,6 +24,7 @@ aux_dir = os.path.sep.join([base_dir, 'data', 'interim', 'ERAI', 'HIRHAM5', 'Aux
 
 
 #%% Create zones file based on SMB from 1990-1999
+years = range(1990, 1999)
 
 # Load GrIS mask
 ds_mask = xr.open_dataset(os.path.sep.join([aux_dir, 'GRLmask.nc']))
@@ -37,7 +38,6 @@ snmel_threshold = 100.
 dry_snow_mask_list = []
 smb_mask_list = []
 
-years = range(1990, 1999)
 for year in years:
     ds = xr.open_dataset(os.path.sep.join([data_dir, f'Daily2D_GRL_{year}.nc']))
 

@@ -7,7 +7,6 @@ this base dataset is then used to create training specific datasets for train_GR
 prepare_trainset.py with class ZarrDataset which is called at beginning of train_GRAMMLET.py
 """
 #%%
-import pandas as pd
 import numpy as np
 import os
 import sys
@@ -20,9 +19,6 @@ script_dir = os.path.abspath(os.path.dirname(__file__))
 project_dir = os.path.sep.join([script_dir, '..', '..'])
 sys.path.append(os.path.sep.join([project_dir , 'src']))
 import logging_config
-import help_fcts
-
-
 
 if __name__ == "__main__":
     dask.config.set(scheduler='threads')
