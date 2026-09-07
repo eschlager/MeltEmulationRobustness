@@ -2,7 +2,7 @@
 """
 @author: eschlager
 Create classification of GrIS in different zones:
-1. ablation (total SMB of 1990-1999 < 0)
+1. ablation (total SMB of the defined years < 0)
 2. percolation (accumulation zone with non-negliglible melt, i.e. at least in one year there was melt >= 100 mm weq)
 3. dry snow (accumulation zone with yearly melt < 100 mm weq)
 
@@ -22,7 +22,9 @@ base_dir = os.path.dirname(os.path.abspath('')).split(os.sep + 'preprocessing')[
 data_dir = os.path.sep.join([base_dir, 'data', 'interim', 'CESM2', 'HIRHAM5', 'firnpack']) 
 aux_dir = os.path.sep.join([base_dir, 'data', 'interim', 'CESM2', 'HIRHAM5', 'AuxFiles'])
 
-#%% Create zones file based on SMB from 1990-1999
+#%% Create zones file based on SMB of following years:
+years = range(1990, 1999)    # for historic data set
+# years = range(2075, 2084)    # for future data set
 
 # Load GrIS mask
 ds_mask = xr.open_dataset(os.path.sep.join([aux_dir, 'GRLmask.nc']))
@@ -36,7 +38,6 @@ snmel_threshold = 100.
 dry_snow_mask_list = []
 smb_mask_list = []
 
-years = range(1990, 1999)
 for year in years:
     ds = xr.open_dataset(os.path.sep.join([data_dir, f'Daily2D_GRL_{year}.nc']))
 
