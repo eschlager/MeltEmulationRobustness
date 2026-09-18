@@ -1,0 +1,61 @@
+# spec file for preparing data for combined training with ERA-Interim forced data
+
+directories:
+  source_dir: data/processed/HIRHAM5-CESM2/v_04
+  base_dir: data/processed/crossval/v_01
+  data_file: CESM2_meltNN_2500
+  out_dir: output/crossval_CESM2_modularNNEBM_mse
+  overwrite: false
+  temp_sub_file: temp_subsample_100.json
+  spatial_sub_file: GRL_subsampleidx_2500_flattened.zarr
+  zones_file: GRLzones.zarr
+
+data:
+  input:
+  - rainfall
+  - snfall
+  - energyin
+  - dswrad
+  - rainfall_10yr-avg
+  - snfall_10yr-avg
+  - energyin_10yr-avg
+  - dswrad_10yr-avg
+  prec_days: 9
+  target:
+  - snmel
+  transform_inputs:
+    rainfall: [log,1]
+    snfall: [log,1]
+    rainfall_10yr-avg: [log,1]
+    snfall_10yr-avg: [log,1]
+
+
+model:
+  hidden_activation: LeakyReLU
+  layers_daily_feat_extractor:
+  - 128
+  - 128
+  - 256
+  layers_medrange_feat_extractor: null
+  layers_regressor:
+  - 256
+  - 128
+  - 64
+  - 32
+  - 16
+  layers_spinup_feat_extractor:
+  - 32
+  - 32
+  output_activation: ""
+  use_season: true
+
+training:
+  restarts: 5
+  batch_size: 256
+  continue_training: false
+  epochs: 300
+  loss_reg: mse
+  lr: 0.03
+  lr_decay: 0.9
+  lr_decay_epochs: 50
+  optimizer: adam
