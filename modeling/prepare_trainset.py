@@ -46,7 +46,13 @@ class ZarrDataset():
         self.directory_specs = specs['directories']
         self.base_dir = os.path.abspath(os.path.sep.join([project_dir, self.directory_specs['base_dir']]))
         self.file_dir = os.path.sep.join([self.base_dir, self.directory_specs['data_file']])
-
+        
+        spec_source_dir = specs['directories'].get('source_dir')
+        if spec_source_dir is None:
+            self.source_dir = self.base_dir
+        else:
+            self.source_dir = os.path.abspath(os.path.sep.join([project_dir, spec_source_dir]))
+        
         self.auto = self.specs['model'].get('auto')
         if not isinstance(self.auto, dict):
             self.auto = {}
@@ -218,19 +224,19 @@ class ZarrDataset():
 
 
     def get_spatial_indices(self):
-        spatial_idx_file = os.path.sep.join([self.file_dir, self.directory_specs['spatial_sub_file']])
+        spatial_idx_file = os.path.sep.join([self.source_dir, self.directory_specs['spatial_sub_file']])
         logging.info(f"Load spatially sub-sampling for training and validation data from file {spatial_idx_file}...")
         spatial_idx = xr.open_dataset(os.path.sep.join([spatial_idx_file]))['subsampling']
         logging.info(f"  sub-sample {int(spatial_idx.sum().item())} locations.")
         return spatial_idx
 
-    def make_file(self, use_spatial_subsampling=True):
+    def make_file(self, use_spatial_subsampling=True, scaler_file=None):
         """Create zarr file from base dataset in case check_file was unsuccessful."""
         os.makedirs(self.file_dir, exist_ok=True)
         logging_config.define_root_logger(os.path.join(self.file_dir, f'log.txt'))
         logging.getLogger().setLevel(logging.INFO)
 
-        temp_data_split = os.path.sep.join([self.base_dir, self.directory_specs['temp_split_file']])
+        temp_data_split = os.path.sep.join([self.source_dir, self.directory_specs['temp_split_file']])
         logging.info(f'Load temporal split data from file {temp_data_split}...')
         with open(temp_data_split, 'r') as f: 
             train_val_test_indices = json.load(f)
@@ -292,36 +298,39 @@ class ZarrDataset():
         val_set = val_set.chunk({"time": self.processing_chunk_size, "z": self.processing_chunk_size})
         val_set = self.add_historic_data(val_set)
 
-        logging.info(f"  use val dataset without sub-sampling for testing after training...")
-        test_dates = pd.to_datetime(train_val_test_indices['test'])
-        test_dates_start = np.min(test_dates) - pd.Timedelta(days=historic_period)
-        test_dates_end = np.max(test_dates)
-        logging.info(f"  extract test data from {test_dates_start} to {test_dates_end} ...")
-        test_set = self.ds.sel(time=slice(test_dates_start,test_dates_end))#.dropna(dim='z', how='any')
-        logging.info(f"  rechunk data for processing ...")
-        test_set = test_set.chunk({"time": self.processing_chunk_size, "z": self.processing_chunk_size})
-        test_set = self.add_historic_data(test_set)
+        # logging.info(f"  use val dataset without sub-sampling for testing after training...")
+        # test_dates = pd.to_datetime(train_val_test_indices['test'])
+        # test_dates_start = np.min(test_dates) - pd.Timedelta(days=historic_period)
+        # test_dates_end = np.max(test_dates)
+        # logging.info(f"  extract test data from {test_dates_start} to {test_dates_end} ...")
+        # test_set = self.ds.sel(time=slice(test_dates_start,test_dates_end))#.dropna(dim='z', how='any')
+        # logging.info(f"  rechunk data for processing ...")
+        # test_set = test_set.chunk({"time": self.processing_chunk_size, "z": self.processing_chunk_size})
+        # test_set = self.add_historic_data(test_set)
         
         self.fill_vals = {var: None for var in self.variables_full_contd if var + '_mask' in self.variables_full}
 
         # fit scaler on spatially and temporally sub-sampled training data!
         train_sub_dates = pd.to_datetime(train_val_test_indices['train_sub'])
         train_sub = train_set.sel(time=train_sub_dates)
-        self.fit_scaler(train_sub)
+        
+        if scaler_file is None:
+            self.fit_scaler(train_sub)
+        else:
+            self.load_scaler(scaler_file)
         ## alternatively load an existing scaler
         # self.load_scaler(self.file_dir+'/std_scaler.npz')
 
         logging.info("Process train set:")
-        train_set = self.apply_scaling(train_set)
-        train_set = self.fill_nans(train_set)
-        train_set = train_set.sel(time=train_dates)
+        train_sub = self.apply_scaling(train_sub)
+        train_sub = self.fill_nans(train_sub)
 
         filepath = os.path.sep.join([self.file_dir, 'fill_nans.npz'])
         logging.info(f'  Save filling values: {filepath}.')
         np.savez(filepath, **self.fill_vals)
 
 
-        train = self.restructure_dataset(train_set)
+        train = self.restructure_dataset(train_sub)
         train_dir = os.path.join(self.file_dir, 'train_sub.zarr')
         logging.info(f"Prepare saving of train data to {train_dir} ...")
         self.save_dataset(train, train_dir, self.batch_size)
@@ -330,26 +339,27 @@ class ZarrDataset():
         val_set = self.apply_scaling(val_set)
         val_set = self.fill_nans(val_set)
         val_set = val_set.sel(time=val_dates)
-        val = self.restructure_dataset(val_set)
-        val_dir = os.path.join(self.file_dir, 'val.zarr')
-        logging.info(f"Prepare saving of val data to {val_dir} ...")
-        self.save_dataset(val, val_dir, self.batch_size)
+        # val = self.restructure_dataset(val_set)
+        # val_dir = os.path.join(self.file_dir, 'val.zarr')
+        # logging.info(f"Prepare saving of val data to {val_dir} ...")
+        # self.save_dataset(val, val_dir, self.batch_size)
 
-        val_sub = val_set.where(spatial_idx, drop=True)
+        val_sub_dates = pd.to_datetime(train_val_test_indices['val_sub'])
+        val_sub = val_set.where(spatial_idx, drop=True).sel(time=val_sub_dates)
         val_sub = self.restructure_dataset(val_sub)
         val_sub_dir = os.path.join(self.file_dir, 'val_sub.zarr')
         logging.info(f"Prepare saving of val data to {val_sub_dir} ...")
         self.save_dataset(val_sub, val_sub_dir, self.batch_size)
 
-        logging.info("Process test set:")
-        test_set = self.apply_scaling(test_set)
-        test_set = self.fill_nans(test_set)
-        test_set = test_set.sel(time=test_dates)
-        test = self.restructure_dataset(test_set)
-        test_dir = os.path.join(self.file_dir, 'test.zarr')
-        logging.info(f"Save test data to {test_dir} ...")
-        nr_locs = len(set(test.z.values))
-        self.save_dataset(test, test_dir, nr_locs)
+        # logging.info("Process test set:")
+        # test_set = self.apply_scaling(test_set)
+        # test_set = self.fill_nans(test_set)
+        # test_set = test_set.sel(time=test_dates)
+        # test = self.restructure_dataset(test_set)
+        # test_dir = os.path.join(self.file_dir, 'test.zarr')
+        # logging.info(f"Save test data to {test_dir} ...")
+        # nr_locs = len(set(test.z.values))
+        # self.save_dataset(test, test_dir, nr_locs)
        
         logging.info(f"Successfully saved processed data!")
 
@@ -471,7 +481,7 @@ class ZarrDataset():
 
 
     def read_data(self):
-        base_file = os.path.abspath(os.path.sep.join([self.base_dir, 'base_dataset.zarr']))
+        base_file = os.path.abspath(os.path.sep.join([self.source_dir, 'base_dataset.zarr']))
         ds = xr.open_zarr(base_file)
         if ('sfwater' in self.variables_daily) and ('sfwater' not in ds.data_vars):
             variables_daily = [v for v in self.variables_daily if v != 'sfwater']
@@ -490,7 +500,7 @@ class ZarrDataset():
             logging.info(f"Select daily variables {self.variables_daily} from base dataset {base_file}.")
         
         if self.inputs_medrange:
-            agg_file = os.path.abspath(os.path.sep.join([self.base_dir, 'base_dataset_tempagg.zarr']))
+            agg_file = os.path.abspath(os.path.sep.join([self.source_dir, 'base_dataset_tempagg.zarr']))
             ds = xr.open_zarr(agg_file)#.shift(time=self.data_specs['prec_days']+1)
             if ('sfwater_med-avg' in self.inputs_medrange) and ('sfwater_med-avg' not in ds.data_vars):
                 inputs_medrange = [v for v in self.inputs_medrange if v != 'sfwater_med-avg']
@@ -505,7 +515,7 @@ class ZarrDataset():
             self.ds = xr.merge([self.ds, ds_agg])
         
         if self.inputs_spinup:
-            spinup_file = os.path.abspath(os.path.sep.join([self.base_dir, 'base_dataset_10yr.zarr']))
+            spinup_file = os.path.abspath(os.path.sep.join([self.source_dir, 'base_dataset_10yr.zarr']))
             ds_spinup = xr.open_zarr(spinup_file)[self.inputs_spinup].astype(np.float32)
             ds_spinup = ds_spinup.reindex(time=self.ds.time, method='nearest', tolerance=pd.Timedelta('1D'))
             logging.info(f"Select 10-yr average variables {self.inputs_spinup} from base dataset {spinup_file}.")
@@ -570,24 +580,24 @@ class ZarrDataset():
         self.scaler_vals = dict.fromkeys(self.variables_full_contd)
         for v in self.variables_contd:
             vars_group = [var for var in self.variables_full_contd if re.fullmatch(rf'{v}(_d-\d+)?', var)]
-            # logging.info(f"    fit standard scaler on {v} for variable group {vars_group}...")
-            logging.info(f"    fit robust scaler on {v} for variable group {vars_group}...")                                   
-            combined = _ds[v]
-            # combined_mean = combined.mean().compute().item()
-            # combined_std = combined.std().compute().item()
-            combined_median = combined.quantile(0.5).compute().item()
-            q1 = combined.quantile(0.25).compute().item()
-            q3 = combined.quantile(0.75).compute().item()
-            combined_iqr = q3 - q1      
+            logging.info(f"    fit standard scaler on {v} for variable group {vars_group}...")
+            # logging.info(f"    fit robust scaler on {v} for variable group {vars_group}...")                                   
+            combined = _ds[v].data.ravel()
+            combined_mean = combined.mean().compute().item()
+            combined_std = combined.std().compute().item()
+            
+            # q1, combined_median, q3 = da.percentile(combined, [25, 50, 75]).compute()
+            # combined_iqr = q3 - q1  
             for vg in vars_group:
-                # self.scaler_vals[vg] = (combined_mean, combined_std)   
-                self.scaler_vals[vg] = (combined_median, combined_iqr)      
+                self.scaler_vals[vg] = (combined_mean, combined_std)   
+                #self.scaler_vals[vg] = (combined_median, combined_iqr)      
         
         logging.info("  resulting mean and std per variable:")
+        # logging.info("  resulting median and iqr per variable:")
         for v,m in self.scaler_vals.items():
             logging.info(v)
-            # logging.info(f"  {v}:   mean={m[0]}, std={m[1]}")
-            logging.info(f"  {v}:   median={m[0]}, iqr={m[1]}")
+            logging.info(f"  {v}:   mean={m[0]}, std={m[1]}")
+            #logging.info(f"  {v}:   median={m[0]}, iqr={m[1]}")
 
         filepath = os.path.sep.join([self.file_dir, 'std_scaler.npz'])
         logging.info(f'  Save scaling parameters in: {filepath}.')
@@ -605,7 +615,8 @@ class ZarrDataset():
             for k in self.variables_contd:
                 self.scaler_vals = {k: npz[k].copy() for k in npz.files}
 
-        logging.info("  mean and std per variable:")
+        logging.info("  mean and std metrics per variable:")
+        #logging.info("  median and iqr metrics per variable:")
         for v,m in self.scaler_vals.items():
             logging.info(v)
             logging.info(f"  {v}:   mean={m[0]}, std={m[1]}")
