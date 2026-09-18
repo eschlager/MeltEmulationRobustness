@@ -26,6 +26,7 @@ class NN(nn.Module):
         use_season (bool, optional): Whether to include seasonality features (day-of-year sine/cosine). Default is True.
         trunoff (bool, optional): Whether to include runoff time scale as input. Default is False.
         n_auto (int, optional): Number of auto-regressive variables to include in final regressor. Default is 0 (no auto-regression).
+        dropout_rate (float, optional): Dropout rate to use in the final regression module. Default is 0.0 (no dropout).
     """
 
     def __init__(
@@ -203,14 +204,14 @@ class NN(nn.Module):
             nr_inputs += 1
         
         layers_regressor = [nr_inputs] + self.layers_regressor
-        self.regressor = NNBlock(layers_regressor, hidden_act=self.hidden_activation, use_batchnorm=False, use_dropout=True)
+        self.regressor = NNBlock(layers_regressor, hidden_act=self.hidden_activation, use_batchnorm=False, dropout_rate=self.dropout_rate)
         
         # define final heads for each target
         self.reg_heads = nn.ModuleDict()
         for i,target in enumerate(self.targets):  
             # add one hidden layer per target
             linear1 = nn.Linear(layers_regressor[-1], layers_regressor[-1])
-            nn.init.kaiming_normal_(linear1.weight, a=0.1, nonlinearity='leaky_relu')
+            nn.init.kaiming_normal_(linear1.weight, a=0.01, nonlinearity='leaky_relu')
             activation1 = getattr(nn, self.hidden_activation)()
             
             # add output layer for each target
@@ -226,7 +227,7 @@ class NN(nn.Module):
             elif self.output_activation[target] == 'Sigmoid':  # use linear activation for classification and BCEwithLogitsLoss, i.e. actually Sigmoid activation!
                 nn.init.xavier_normal_(linear2.weight)   
             else: 
-                nn.init.kaiming_normal_(linear2.weight, a=0.1, nonlinearity='leaky_relu')       
+                nn.init.kaiming_normal_(linear2.weight, a=0.01, nonlinearity='leaky_relu')       
             
             if (self.output_activation[target] == 'Sigmoid') or (self.output_activation[target] == ''):
                 # do not use output activation for BCEwithLogits
@@ -252,7 +253,7 @@ class NN(nn.Module):
         
         
 class NNBlock(nn.Module): 
-    def __init__(self, layers, hidden_act, use_batchnorm=False, use_dropout=False):
+    def __init__(self, layers, hidden_act, use_batchnorm=False, dropout_rate=0):
         super().__init__()
         
         hidden_activation = getattr(nn, hidden_act)()
@@ -265,8 +266,8 @@ class NNBlock(nn.Module):
                     self.linears.append(nn.BatchNorm1d(layers[i+1]))
                 self.linears.append(hidden_activation)
 
-                if use_dropout and layers[i+1] > 64: 
-                    self.linears.append(nn.Dropout(p=self.dropout_rate))
+                if dropout_rate>0 and layers[i+1] > 64: 
+                    self.linears.append(nn.Dropout(p=dropout_rate))
 
         self.apply(self._initialize_weights)  
          
@@ -311,12 +312,14 @@ def init_model(var_names_dict, specs):
     layers_spinup = _get_block_layers(var_names_dict['spinup'], 'layers_spinup_feat_extractor', specs)
 
     layers_regressor = specs['model']['layers_regressor']
+    dropout_rate = specs['model'].get('dropout_rate', 0)
 
     trunoff = True if 'trunoff_file' in specs['directories'] else False
     model = NN(targets=targets, layers_daily=layers_daily, layers_regressor=layers_regressor, 
                     hidden_activation=hidden_activation, output_activation=output_activation, 
                     layers_medrange=layers_medrange, layers_spinup=layers_spinup, 
-                    use_season=use_season, trunoff=trunoff, n_auto=n_auto_vars)
+                    use_season=use_season, trunoff=trunoff, n_auto=n_auto_vars,
+                    dropout_rate=dropout_rate)
     return model
 
 
