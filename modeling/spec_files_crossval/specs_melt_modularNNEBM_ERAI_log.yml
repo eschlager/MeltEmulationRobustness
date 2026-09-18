@@ -1,11 +1,12 @@
-# use for testing crossval_meltNN.py
+# spec file for Crossvalidation on ERA-Interim forced data using Modular NN EBM
+# use for script crossval_meltNN.py
 
 directories:
   base_dir: data/processed/crossval/v_01
-  data_file: ERAI_meltNN
-  out_dir: output/crossval_test
-  overwrite: true
-  temp_sub_file: temp_subsample_50_1990-1996.json
+  data_file: ERAI_meltNN_albedo
+  out_dir: output/crossvalyears_ERAI_modularNNEBM_log
+  overwrite: false
+  temp_sub_file: temp_subsample_100.json
   spatial_sub_file: GRL_subsampleidx_5000_flattened.zarr
   zones_file: GRLzones.zarr
 
@@ -28,19 +29,19 @@ data:
     rainfall_10yr-avg: [log,1]
     snfall_10yr-avg: [log,1]
 
+
 model:
   hidden_activation: LeakyReLU
   layers_daily_feat_extractor:
   - 128
   - 128
-  - 256
+  - 128
   layers_medrange_feat_extractor: null
   layers_regressor:
-  - 256
+  - 160
+  - 128
   - 128
   - 64
-  - 32
-  - 16
   layers_spinup_feat_extractor:
   - 32
   - 32
@@ -48,12 +49,12 @@ model:
   use_season: true
 
 training:
-  restarts: 2
-  batch_size: 16
+  restarts: 5
+  batch_size: 512
   continue_training: false
-  epochs: 2
+  epochs: 300
   loss_reg: mse
-  lr: 0.04
+  lr: 0.03
   lr_decay: 0.9
   lr_decay_epochs: 50
   optimizer: adam
