@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Created on 15.11.2025
+Created on 31.03.2026
 @author: eschlager
-Main script to prepare data and apply trained model
+Main script to prepare data and apply trained models of a crossvalidation study or a folder with repeated training runs
 """
 
 import logging
@@ -20,7 +20,6 @@ sys.path.append(os.path.sep.join([project_dir , 'modeling', 'models']))
 sys.path.append(os.path.sep.join([project_dir, 'modeling']))
 import read_yaml
 from prepare_trainset import ZarrDataset
-import eval_meltNN
 import shutil
 import zarr
 
@@ -50,30 +49,49 @@ if __name__ == "__main__":
     except RuntimeError:     
         pass
 
-    # Create predictions for 1990-2016
 
-    # # define which model to use
-    # out_dir = os.path.sep.join(['/dmidata', 'projects', 'smb_and_polar_rcm', 'elkesc', 'output', 'Crossval', 'crossval_CESM2_modularNNEBM'])
-    # data_dir = os.path.sep.join(['/dmidata', 'users', 'elkesc', 'MeltEmulation', 'data', 'processed', 'crossval', 'v_01', 'CESM2_meltNN', 'data.zarr'])
-    out_dir = os.path.sep.join([project_dir, 'output', 'crossval_ERAI_modularNNEBM_noshuffle_smallNN_transform_20260515_144453'])
-    data_dir = os.path.sep.join([project_dir, 'data', 'processed', 'crossval', 'v_01', 'ERAI_meltNN', 'data.zarr'])
+    DATASET = 'ECEfuture'
+    MODEL = 'CESM2future'
 
+    # directory of trained models
+    out_dir = os.path.sep.join([project_dir, 'output', f'repeated_{MODEL}_modularNNEBMphysical20onlyabove10mm_log'])
 
-    #out_dir = os.path.sep.join([project_dir, 'output', 'crossval_ERAI_modularNNEBM_stabilized'])
+    # directory of data to apply the models
+    data_dir = os.path.sep.join([project_dir, 'data', 'processed', 'crossval', 'v_01', f'{DATASET}_meltNN', 'data.zarr'])
 
-    logging_config.define_root_logger(os.path.join(out_dir, f'log_predictions_ERA_data_ERAI_model.txt'))
+    if 'future' in DATASET:
+        dates = (pd.date_range(start="2075-01-01", end="2100-12-31")+pd.Timedelta(hours=12)).tolist()
+    else:
+        dates = (pd.date_range(start="1990-01-01", end="2016-12-31")+pd.Timedelta(hours=12)).tolist()
+        
+    ## ----- if data.zarr does not exist, can also create it here ----- ##
+    # os.makedirs(os.path.join(data_dir, '..'), exist_ok=True)
+    # logging_config.define_root_logger(os.path.join(data_dir, '..', 'log_data.txt'))
+    # logging.getLogger().setLevel(logging.INFO)
+
+    # # define the correct spec file:
+    # specs = read_yaml.read_yaml_file(os.path.sep.join([project_dir, 'modeling', 'spec_files_transfer', f'specs_melt_modularNNEBMalbedo_{MODEL}_log.yml']))
+    # zarrset = ZarrDataset(specs)
+
+    # # define the correct base files
+    # daily_file = os.path.abspath(os.path.sep.join([project_dir, 'data', 'processed','HIRHAM5-ECE', 'future', 'base_dataset.zarr']))
+    # spinup_file = os.path.abspath(os.path.sep.join([project_dir, 'data', 'processed','HIRHAM5-ECE', 'future', 'base_dataset_10yr.zarr']))
+    # zarrset.prepare_prediction_file(dates, daily_file, spinup_file=spinup_file, chunksize={"time":32}, savedir=data_dir)
+ 
+    logging_config.define_root_logger(os.path.join(out_dir, f'log_predictions_{DATASET}_data_{MODEL}_model.txt'))
     logging.getLogger().setLevel(logging.INFO)
 
-    RECONSTRUCT_COORDS = False  # to save space?
+    RECONSTRUCT_COORDS = False  # to save space
 
-    # only few models and 2 years for testing purpose
-    years = range(2002, 2017, 2) #range(1992, 2017, 2)
-    years = [1996, 2004]
+    # years = range(1992, 2017, 2)     # define folds of cross-validation study
+    years = [2016]                     # for repeated training; just a place-holder of one element for correct folder access
+
     iters = range(20)
-    dates = (pd.date_range(start="1990-01-01", end="2016-12-31")+pd.Timedelta(hours=12)).tolist()
-
-    for y in years:
-        fold = f'fold_{y}'
+    
+    for y in years:   # iterate through validation folds
+        # fold = f'fold_{y}'   # for cross-validation
+        fold = ''              # for repeated training
+        
         model_dir = os.path.sep.join([out_dir, fold])
         scalerpath = os.path.sep.join([model_dir, 'std_scaler.npz'])
 
@@ -84,15 +102,9 @@ if __name__ == "__main__":
         # data_dir = os.path.sep.join([project_dir, specs['directories']['base_dir'], specs['directories']['data_file'], 'data.zarr'])
         val_data = FirnpackCellsDataset(data_dir, dates=dates, variable_names=var_dict, scaling=scalerpath)
 
-        # device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        device = 'cpu'
-        logging.info(f'Using device {device}')   
-        #dataloader = DataLoader(val_data, batch_size=32, shuffle=False, collate_fn=my_collate_fn, num_workers=4, prefetch_factor=2)
-        dataloader = DataLoader(val_data, batch_size=366, shuffle=False, collate_fn=my_collate_fn, num_workers=4, prefetch_factor=2,
-                                persistent_workers=True, worker_init_fn=AffinityInitializer(base_offset=0, cores_per_worker=4))
-        # dataloader = DataLoader(val_data, batch_size=366, shuffle=False, collate_fn=my_collate_fn, num_workers=4, prefetch_factor=2,)
-                                # persistent_workers=True, worker_init_fn=AffinityInitializer(base_offset=0, cores_per_worker=4))
-        
+        dataloader = DataLoader(val_data, batch_size=100, shuffle=False, collate_fn=my_collate_fn, num_workers=4, prefetch_factor=1,
+                                persistent_workers=True)
+
         ds_x = xr.open_zarr(val_data.file_dir)
         x_coords = ds_x['x'].values.copy()
         y_coords = ds_x['y'].values.copy()
@@ -117,11 +129,11 @@ if __name__ == "__main__":
                 logging.error(f"Could not read coordinates from reference file {coords_file}: {e}")
                 raise ValueError(f"Could not read coordinates from reference file {coords_file}: {e}")
 
-        for it in iters:
+        for it in iters:   # iterate through the repeated trainings and make prediction file for each of them
             model_iter_dir = os.path.sep.join([model_dir, f'iter_{it}'])
-            filedir=os.path.sep.join([model_iter_dir, 'pred_data.zarr'])
+            filedir=os.path.sep.join([model_iter_dir, f'pred_data_{DATASET}.zarr'])
             if not os.path.exists(filedir):
-                model_predictor = predictor.ModelPredictor(model_iter_dir, var_dict, dataloader, filedir=filedir, load='best', device=device)
+                model_predictor = predictor.ModelPredictor(model_iter_dir, var_dict, dataloader, filedir=filedir, load='best_train', device='cpu')
 
                 model_predictor.make_predictions_file(coords=(x_coords, y_coords), 
                                                         ref_coords=xy_coords_ref, 
@@ -130,15 +142,14 @@ if __name__ == "__main__":
         
         shutdown_dataloader(dataloader)
         val_data.close()
-        del val_data 
+        del val_data
                 
         # merge all predictions across the iterations in one file
-        filedir = os.path.sep.join([out_dir, fold, 'pred_data.zarr'])
-
+        filedir = os.path.sep.join([out_dir, fold, f'pred_data_{DATASET}.zarr'])
 
         for it in iters:
             model_dir = os.path.sep.join([out_dir, fold, f'iter_{it}'])
-            file_iter = os.path.sep.join([model_dir, 'pred_data.zarr'])
+            file_iter = os.path.sep.join([model_dir, f'pred_data_{DATASET}.zarr'])
 
             if not os.path.exists(filedir):
                 # copy file of first iteration
@@ -151,7 +162,7 @@ if __name__ == "__main__":
                     ds_merged = xr.merge([ds_true, ds_pred])
                     ds_merged.to_zarr(filedir,                                      
                                     encoding={
-                                            var: {"compressor": zarr.codecs.BloscCodec(cname="zstd", clevel=5)}
+                                            var: {"compressors": zarr.codecs.BloscCodec(cname="zstd", clevel=5)}
                                             for var in ds_merged.data_vars
                                         })
                     del ds, ds_true, ds_pred, ds_merged                    
@@ -159,16 +170,24 @@ if __name__ == "__main__":
                     logging.warning(f'First iteration predictions file {file_iter} does not exist.')
             else:
                 if os.path.exists(file_iter):
+
                     logging.info(f'Appending predictions from {file_iter} to {filedir} ...')
                     ds = xr.load_dataset(file_iter)[['snmel_pred']]
                     ds_pred = ds[['snmel_pred']].expand_dims(iteration=[it])
+                    
                     ds_pred.to_zarr(filedir, mode='a', append_dim='iteration')
+                    
+                    ## in case of replacing an already written prediction:
+                    # ds_pred = ds_pred.drop_vars(['time', 'x', 'y'], errors='ignore')
+                    # ds_pred.to_zarr(filedir, mode='r+',region={'iteration': slice(it, it+1)})
+
                     del ds, ds_pred
                 else:
-                    logging.warning(f'First iteration predictions file {file_iter} does not exist.')
+                    logging.warning(f'Predictions file of iteration {file_iter} does not exist.')
 
         gc.collect()
 
+        # delete the individual prediction files if merging was successful
         success = False
         try:
             ds_check = xr.open_zarr(filedir)
@@ -184,7 +203,7 @@ if __name__ == "__main__":
         if success:
             for it in iters:
                 model_dir = os.path.sep.join([out_dir, fold, f'iter_{it}'])
-                file_iter = os.path.sep.join([model_dir, 'pred_data.zarr'])
+                file_iter = os.path.sep.join([model_dir, f'pred_data_{DATASET}.zarr'])
                 shutil.rmtree(file_iter)
         else:
             logging.warning("Not deleting source file because validation failed.")
